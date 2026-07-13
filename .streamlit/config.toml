@@ -1,0 +1,11 @@
+# このファイルを リポジトリ直下の  .streamlit/config.toml  に置いてください。
+# GitHub Codespaces で分析軸などのウィジェット操作時に出る
+# 「Connection error: Connection failed with status 401」を回避する設定です。
+[server]
+enableCORS = false
+enableXsrfProtection = false
+enableWebsocketCompression = false
+headless = true
+
+[browser]
+gatherUsageStats = false
