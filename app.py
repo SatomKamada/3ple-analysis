@@ -448,20 +448,17 @@ DATE_MAX = df["order_date"].max().date()
 
 
 def month_range_selector(key, label="分析期間"):
-    """左に「分析期間」ラベル、右に xxxx/xx/xx 〜 xxxx/xx/xx の日付範囲ピッカー。"""
-    c = st.columns([1, 5])
+    """左に「分析期間」ラベル、右に開始日／終了日の2つの日付ピッカー（分離表示）。"""
+    c = st.columns([1, 2, 2, 3])
     c[0].markdown(
         f"<div style='font-weight:700; padding-top:34px; color:#16191f;'>{label}</div>",
         unsafe_allow_html=True)
-    rng = c[1].date_input(
-        "期間", value=(DATE_MIN, DATE_MAX),
-        min_value=DATE_MIN, max_value=DATE_MAX,
-        format="YYYY/MM/DD", key=f"{key}_range",
-        label_visibility="collapsed")
-    if isinstance(rng, tuple) and len(rng) == 2:
-        s, e = rng
-    else:
-        s = e = rng if not isinstance(rng, tuple) else DATE_MAX
+    s = c[1].date_input(
+        "開始日", value=DATE_MIN, min_value=DATE_MIN, max_value=DATE_MAX,
+        format="YYYY/MM/DD", key=f"{key}_start")
+    e = c[2].date_input(
+        "終了日", value=DATE_MAX, min_value=DATE_MIN, max_value=DATE_MAX,
+        format="YYYY/MM/DD", key=f"{key}_end")
     if s > e:
         s, e = e, s
     s_ts = pd.Timestamp(s)
@@ -718,36 +715,48 @@ with tab_hs:
     total_sales = f_cur["sales_amount"].sum()
     promo_sales = f_cur[f_cur["promo_type"] != "なし"]["sales_amount"].sum()
 
-    k = st.columns([1, 2.2, 1, 1])
-    k[0].metric("販促費予算 合計", man(budget_total))
     grant_ratio = grant_total / budget_total * 100 if budget_total else 0
-    k[1].markdown(
-        f"""<div class="custom-metric">
-        <p class="custom-metric-label">販促費付与額 合計(予算比 {grant_ratio:.1f}%)</p>
-        <div style="display:flex; align-items:baseline; gap:22px; flex-wrap:wrap;">
-          <div style="font-size:1.6rem; font-weight:700; color:#16191f;">{man(grant_total)}</div>
-          <div style="font-size:0.95rem; color:#5f6b7a; border-left:1px solid #e9ebed; padding-left:18px;">
-            内訳：ポイント付与額 <b style="color:#16191f;">{man(fp)}</b>
-            ／ クーポン付与額 <b style="color:#16191f;">{man(fc)}</b>
-          </div>
-        </div></div>""",
-        unsafe_allow_html=True)
     rest_budget = max(budget_total - grant_total, 0)
     rest_ratio = rest_budget / budget_total * 100 if budget_total else 0
     rest_color = GAPNEG if grant_ratio >= 80 else "#16191f"
     rest_note = ("消化80%以上（要注意）"
                  if grant_ratio >= 80 else f"予算の {rest_ratio:.1f}% が残")
-    k[2].markdown(
-        f"""<div class="custom-metric">
-        <p class="custom-metric-label">残予算額</p>
-        <div style="font-size:1.6rem; font-weight:700; color:{rest_color}; line-height:1.2;">
-          {man(rest_budget)}
-        </div>
-        <div style="font-size:0.8rem; color:{rest_color}; margin-top:2px;">{rest_note}</div>
-        </div>""",
+    promo_ratio = promo_sales / total_sales * 100 if total_sales else 0
+
+    CARD_H = 140  # 全カード共通の縦幅（px）
+
+    def card(label, main_html, sub_html=""):
+        return (f"<div class='custom-metric' style='height:{CARD_H}px; "
+                f"min-height:{CARD_H}px; justify-content:flex-start;'>"
+                f"<p class='custom-metric-label' style='margin-bottom:8px;'>{label}</p>"
+                f"<div style='flex:1; display:flex; flex-direction:column; "
+                f"justify-content:center;'>{main_html}"
+                f"{('<div style=\"margin-top:6px;\">' + sub_html + '</div>') if sub_html else ''}"
+                f"</div></div>")
+
+    k = st.columns([1, 2.4, 1, 1])
+    k[0].markdown(card(
+        "販促費予算 合計",
+        f"<div style='font-size:1.6rem; font-weight:700; color:#16191f;'>"
+        f"{man(budget_total)}</div>"), unsafe_allow_html=True)
+    k[1].markdown(card(
+        f"販促費付与額 合計（予算比 {grant_ratio:.1f}%）",
+        f"<div style='display:flex; align-items:baseline; gap:22px; flex-wrap:wrap;'>"
+        f"<div style='font-size:1.6rem; font-weight:700; color:#16191f;'>{man(grant_total)}</div>"
+        f"<div style='font-size:0.95rem; color:#5f6b7a; border-left:1px solid #e9ebed; "
+        f"padding-left:18px;'>内訳：ポイント付与額 <b style='color:#16191f;'>{man(fp)}</b>"
+        f"／ クーポン付与額 <b style='color:#16191f;'>{man(fc)}</b></div></div>"),
         unsafe_allow_html=True)
-    k[3].metric("施策経由 売上比率",
-                f"{promo_sales/total_sales*100 if total_sales else 0:.1f}%")
+    k[2].markdown(card(
+        "残予算額",
+        f"<div style='font-size:1.6rem; font-weight:700; color:{rest_color}; "
+        f"line-height:1.2;'>{man(rest_budget)}</div>",
+        f"<div style='font-size:0.8rem; color:{rest_color};'>{rest_note}</div>"),
+        unsafe_allow_html=True)
+    k[3].markdown(card(
+        "施策経由 売上比率",
+        f"<div style='font-size:1.6rem; font-weight:700; color:#16191f;'>"
+        f"{promo_ratio:.1f}%</div>"), unsafe_allow_html=True)
     st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
 
     # ============ サイト内インセンティブ（表示・集計単位つき） ============
@@ -841,8 +850,7 @@ with tab_hs:
         chart_with_nav(qs_style(seg_chart), show_nav_hs, "hs_seg", spacer_px=110)
 
     # ============ 分析期間（施策別の内訳・流入元 共通） ============
-    f_span, sel_span, _, _ = month_range_selector("hs_span",
-                                                  "分析期間（施策別の内訳・流入元）")
+    f_span, sel_span, _, _ = month_range_selector("hs_span", "分析期間")
 
     # ============ 施策別の内訳（散布図：粗利 vs 販促コスト） ============
     with st.container(border=True):
