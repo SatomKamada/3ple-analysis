@@ -388,7 +388,8 @@ def axis_filters(suffix, show_gran=True):
             cg = st.columns([1, 6])
             cg[0].markdown("<div style='font-weight:700; padding-top:8px; color:#16191f;'>表示・集計単位：</div>",
                            unsafe_allow_html=True)
-            gran = cg[1].radio("集計単位", ["年別", "月別", "日別"], horizontal=True,
+            gran = cg[1].radio("集計単位", ["年別", "クォータ別", "月別", "日別"],
+                               horizontal=True,
                                label_visibility="collapsed", key=f"gran_{suffix}")
         st.form_submit_button("この条件で表示", type="primary")
     return mask, gran
@@ -406,6 +407,17 @@ def build_periods(f, gran, suffix):
         if not view:
             return None
         return fd, view, view, None, f"{view[0]}〜{view[-1]}"
+
+    if gran == "クォータ別":
+        # 期間コード "YYYY-Q" / 表示 "YYYY年 nQ"
+        qs = f["order_date"].dt.year.astype(str) + "-" + f["order_date"].dt.quarter.astype(str)
+        fd = f.assign(_p=qs)
+        view = sorted(fd["_p"].unique(), key=lambda p: (int(p.split("-")[0]),
+                                                       int(p.split("-")[1])))
+        if not view:
+            return None
+        xlabels = [f"{p.split('-')[0]}年/{p.split('-')[1]}Q" for p in view]
+        return fd, view, xlabels, None, f"{xlabels[0]}〜{xlabels[-1]}"
 
     if gran == "月別":
         fd = f.assign(_p=f["order_date"].dt.strftime("%Y-%m"))
@@ -537,6 +549,12 @@ with tab_yj:
                 y_val = int(p[:4])
                 mons = [mm for mm in months_present_yj if mm[:4] == str(y_val)]
                 t = sum(get_target(y_val, int(mm[5:7]), target_base) for mm in mons)
+            elif gran_yj == "クォータ別":
+                y_val, q_val = int(p.split("-")[0]), int(p.split("-")[1])
+                q_mons = [(q_val - 1) * 3 + 1, (q_val - 1) * 3 + 2, (q_val - 1) * 3 + 3]
+                mons = [mm for mm in months_present_yj
+                        if mm[:4] == str(y_val) and int(mm[5:7]) in q_mons]
+                t = sum(get_target(y_val, int(mm[5:7]), target_base) for mm in mons)
             elif gran_yj == "月別":
                 t = get_target(int(p[:4]), int(p[5:7]), target_base)
             else:
@@ -545,10 +563,13 @@ with tab_yj:
             tgt.append(t)
 
         traffic_p = traffic_all.copy()
+        _dt = pd.to_datetime(traffic_p["order_date"])
         if gran_yj == "年別":
-            traffic_p["_p"] = pd.to_datetime(traffic_p["order_date"]).dt.year.astype(str) + "年"
+            traffic_p["_p"] = _dt.dt.year.astype(str) + "年"
+        elif gran_yj == "クォータ別":
+            traffic_p["_p"] = _dt.dt.year.astype(str) + "-" + _dt.dt.quarter.astype(str)
         elif gran_yj == "月別":
-            traffic_p["_p"] = pd.to_datetime(traffic_p["order_date"]).dt.strftime("%Y-%m")
+            traffic_p["_p"] = _dt.dt.strftime("%Y-%m")
         else:
             traffic_p["_p"] = traffic_p["order_date"]
         tsess = traffic_p.groupby("_p")["sessions"].sum()
@@ -766,7 +787,8 @@ with tab_hs:
         cg = st.columns([1.2, 6])
         cg[0].markdown("<div style='font-weight:700; padding-top:8px; color:#16191f;'>"
                        "表示・集計単位：</div>", unsafe_allow_html=True)
-        gran_hs = cg[1].radio("集計単位", ["年別", "月別", "日別"], horizontal=True,
+        gran_hs = cg[1].radio("集計単位", ["年別", "クォータ別", "月別", "日別"],
+                              horizontal=True,
                               label_visibility="collapsed", key="gran_hs")
 
         periods_hs = build_periods(f_hs, gran_hs, "hs")
@@ -776,9 +798,17 @@ with tab_hs:
         months_present_hs = sorted(f_hs["order_date"].dt.strftime("%Y-%m").unique())
 
         def budget_for(p, name):
-            """期間pに対応する予算額（年別＝当年の月数分、月別＝月次、日別＝日割り）"""
+            """期間pに対応する予算額（年別＝当年の月数分、クォータ別＝該当月数分、
+            月別＝月次、日別＝日割り）"""
             if gran_hs == "年別":
                 mons = [m for m in months_present_hs if m[:4] == p[:4]]
+                return BUDGET_M[name] * max(len(mons), 1)
+            if gran_hs == "クォータ別":
+                y_, q_ = p.split("-")
+                q_mons = [(int(q_) - 1) * 3 + 1, (int(q_) - 1) * 3 + 2,
+                          (int(q_) - 1) * 3 + 3]
+                mons = [m for m in months_present_hs
+                        if m[:4] == y_ and int(m[5:7]) in q_mons]
                 return BUDGET_M[name] * max(len(mons), 1)
             if gran_hs == "月別":
                 return BUDGET_M[name]
