@@ -123,10 +123,10 @@ REQUIRED = ["order_date", "order_datetime", "member_rank", "cat_l", "cat_m", "ca
 
 # ---- デモ属性のマスタ（CSVに無い分析軸を order_id から決定論的に導出）----
 REPS = ["田中", "佐藤", "鈴木", "高橋", "伊藤"]
-MAKERS = [f"メーカー{c}" for c in "ABCDEFGH"]
-BRANDS = [f"ブランド{i:02d}" for i in range(1, 11)]
+STORE_CH = ["本店", "d店", "d払い店", "うま博", "バリューマルシェ",
+            "生活市場", "Y店", "R店", "A店"]
+SUPPLIERS = ["アサヒ飲料株式会社", "株式会社伊藤園", "株式会社ライフェスト"]
 AGE_ORDER = ["10代", "20代", "30代", "40代", "50代", "60代", "70代", "80代", "90代"]
-PRICE_ORDER = ["〜1,000円", "1,000〜3,000円", "3,000〜5,000円", "5,000〜10,000円", "10,000円〜"]
 TRADE_ORDER = ["在庫型", "受注型", "直送型"]
 CHOPPLE_ORDER = ["通常", "仕入れ"]
 GENDER_ORDER = ["女性", "男性"]
@@ -152,15 +152,13 @@ def read_data():
     df["取引区分"] = np.select([n % 10 < 6, n % 10 < 9], ["在庫型", "受注型"], default="直送型")
     df["営業担当"] = np.array(REPS)[n % len(REPS)]
     df["ちょっプル"] = np.where(n % 7 < 2, "仕入れ", "通常")
-    df["メーカー"] = np.array(MAKERS)[(n // 7) % len(MAKERS)]
-    df["ブランド"] = np.array(BRANDS)[(n // 3) % len(BRANDS)]
+    df["チャネル別"] = np.array(STORE_CH)[(n // 11) % len(STORE_CH)]
+    df["仕入先"] = np.array(SUPPLIERS)[(n // 13) % len(SUPPLIERS)]
     r = n % 100
     df["年代"] = np.select(
         [r < 2, r < 20, r < 42, r < 64, r < 79, r < 89, r < 95, r < 98],
         AGE_ORDER[:8], default="90代")
     df["性別"] = np.where(n % 97 < 55, "女性", "男性")
-    df["価格帯"] = pd.cut(df["price"], bins=[0, 1000, 3000, 5000, 10000, np.inf],
-                       labels=PRICE_ORDER, right=False).astype(str)
 
     # --- 顧客ID（デモ）：ヘビー/ミドル/ライト層で偏りを持たせた決定論的な割当 ---
     h = (n * 2654435761) % 100000
@@ -340,32 +338,29 @@ def axis_filters(suffix, show_gran=True):
 
         # ---- 商品 ----
         st.markdown("<div class='axis-group'>商品</div>", unsafe_allow_html=True)
-        c = st.columns(4)
+        c = st.columns(2)
         v_chop = c[0].multiselect("ちょっプル", CHOPPLE_ORDER, key=f"chop_{suffix}")
+        v_store = c[1].multiselect("チャネル別", STORE_CH, key=f"store_{suffix}")
         if v_chop:
             mask &= df["ちょっプル"].isin(v_chop)
+        if v_store:
+            mask &= df["チャネル別"].isin(v_store)
+
+        c = st.columns(4)
         all_l = sorted(df["cat_l"].unique())
-        v_l = c[1].multiselect("カテゴリ（大）", all_l, key=f"cat_l_{suffix}")
+        v_l = c[0].multiselect("カテゴリ（大）", all_l, key=f"cat_l_{suffix}")
         lmask = df["cat_l"].isin(v_l) if v_l else FULL
         mid = sorted(df.loc[lmask, "cat_m"].unique())
-        v_m = c[2].multiselect("カテゴリ（中）", mid, key=f"cat_m_{suffix}")
+        v_m = c[1].multiselect("カテゴリ（中）", mid, key=f"cat_m_{suffix}")
         mmask = df["cat_m"].isin(v_m) if v_m else FULL
         sopts = sorted(df.loc[lmask & mmask, "cat_s"].unique())
-        v_s = c[3].multiselect("カテゴリ（小）", sopts, key=f"cat_s_{suffix}")
+        v_s = c[2].multiselect("カテゴリ（小）", sopts, key=f"cat_s_{suffix}")
+        v_sup = c[3].multiselect("仕入先", SUPPLIERS, key=f"sup_{suffix}")
         mask &= lmask & mmask
         if v_s:
             mask &= df["cat_s"].isin(v_s)
-
-        c = st.columns(3)
-        v_maker = c[0].multiselect("メーカー", MAKERS, key=f"maker_{suffix}")
-        v_brand = c[1].multiselect("ブランド", BRANDS, key=f"brand_{suffix}")
-        v_price = c[2].multiselect("価格帯", PRICE_ORDER, key=f"price_{suffix}")
-        if v_maker:
-            mask &= df["メーカー"].isin(v_maker)
-        if v_brand:
-            mask &= df["ブランド"].isin(v_brand)
-        if v_price:
-            mask &= df["価格帯"].isin(v_price)
+        if v_sup:
+            mask &= df["仕入先"].isin(v_sup)
 
         # ---- ユーザー情報 ----
         st.markdown("<div class='axis-group'>ユーザー情報</div>", unsafe_allow_html=True)
@@ -447,23 +442,33 @@ def build_periods(f, gran, suffix):
     return fd, view, xlabels, key, f"{y_dt}年{mo_dt}月"
 
 
-# ==================== 期間レンジ選択（開始月〜終了月） ====================
-ALL_MONTHS = sorted(df["order_date"].dt.strftime("%Y-%m").unique())
+# ==================== 期間レンジ選択（日付範囲） ====================
+DATE_MIN = df["order_date"].min().date()
+DATE_MAX = df["order_date"].max().date()
 
 
 def month_range_selector(key, label="分析期間"):
-    """開始月と終了月を選んで期間を絞る。逆転入力は自動で入れ替え。"""
-    def disp(p):
-        return f"{p[:4]}年{int(p[5:7])}月"
-    c = st.columns([2, 2, 5])
-    s = c[0].selectbox(f"{label}：開始月", ALL_MONTHS, index=0,
-                       key=f"{key}_start", format_func=disp)
-    e = c[1].selectbox(f"{label}：終了月", ALL_MONTHS, index=len(ALL_MONTHS) - 1,
-                       key=f"{key}_end", format_func=disp)
+    """左に「分析期間」ラベル、右に xxxx/xx/xx 〜 xxxx/xx/xx の日付範囲ピッカー。"""
+    c = st.columns([1, 5])
+    c[0].markdown(
+        f"<div style='font-weight:700; padding-top:34px; color:#16191f;'>{label}</div>",
+        unsafe_allow_html=True)
+    rng = c[1].date_input(
+        "期間", value=(DATE_MIN, DATE_MAX),
+        min_value=DATE_MIN, max_value=DATE_MAX,
+        format="YYYY/MM/DD", key=f"{key}_range",
+        label_visibility="collapsed")
+    if isinstance(rng, tuple) and len(rng) == 2:
+        s, e = rng
+    else:
+        s = e = rng if not isinstance(rng, tuple) else DATE_MAX
     if s > e:
         s, e = e, s
-    ym = df["order_date"].dt.strftime("%Y-%m")
-    return df[(ym >= s) & (ym <= e)], f"{disp(s)}〜{disp(e)}", s, e
+    s_ts = pd.Timestamp(s)
+    e_ts = pd.Timestamp(e) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    lbl = f"{s.strftime('%Y/%m/%d')}〜{e.strftime('%Y/%m/%d')}"
+    d = df["order_date"]
+    return df[(d >= s_ts) & (d <= e_ts)], lbl, s.strftime("%Y-%m"), e.strftime("%Y-%m")
 
 
 # ==================== タブ構成 ====================
@@ -713,12 +718,12 @@ with tab_hs:
     total_sales = f_cur["sales_amount"].sum()
     promo_sales = f_cur[f_cur["promo_type"] != "なし"]["sales_amount"].sum()
 
-    k = st.columns([1, 2.2, 1])
+    k = st.columns([1, 2.2, 1, 1])
     k[0].metric("販促費予算 合計", man(budget_total))
     grant_ratio = grant_total / budget_total * 100 if budget_total else 0
     k[1].markdown(
         f"""<div class="custom-metric">
-        <p class="custom-metric-label">販促費付与額 合計（予算比 {grant_ratio:.1f}%）</p>
+        <p class="custom-metric-label">販促費付与額 合計(予算比 {grant_ratio:.1f}%)</p>
         <div style="display:flex; align-items:baseline; gap:22px; flex-wrap:wrap;">
           <div style="font-size:1.6rem; font-weight:700; color:#16191f;">{man(grant_total)}</div>
           <div style="font-size:0.95rem; color:#5f6b7a; border-left:1px solid #e9ebed; padding-left:18px;">
@@ -727,7 +732,21 @@ with tab_hs:
           </div>
         </div></div>""",
         unsafe_allow_html=True)
-    k[2].metric("施策経由 売上比率",
+    rest_budget = max(budget_total - grant_total, 0)
+    rest_ratio = rest_budget / budget_total * 100 if budget_total else 0
+    rest_color = GAPNEG if grant_ratio >= 80 else "#16191f"
+    rest_note = ("消化80%以上（要注意）"
+                 if grant_ratio >= 80 else f"予算の {rest_ratio:.1f}% が残")
+    k[2].markdown(
+        f"""<div class="custom-metric">
+        <p class="custom-metric-label">残予算額</p>
+        <div style="font-size:1.6rem; font-weight:700; color:{rest_color}; line-height:1.2;">
+          {man(rest_budget)}
+        </div>
+        <div style="font-size:0.8rem; color:{rest_color}; margin-top:2px;">{rest_note}</div>
+        </div>""",
+        unsafe_allow_html=True)
+    k[3].metric("施策経由 売上比率",
                 f"{promo_sales/total_sales*100 if total_sales else 0:.1f}%")
     st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
 
