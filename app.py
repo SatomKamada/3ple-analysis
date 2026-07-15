@@ -172,10 +172,18 @@ def read_data():
 
     # --- 施策種類（デモ）：ポイント／クーポンの内訳分類 ---
     pt_types = np.array(["誕生月ポイント", "ランクアップ特典", "レビュー投稿", "新規入会"])
-    cp_types = np.array(["10%OFFクーポン", "500円OFFクーポン", "送料無料クーポン", "会員限定クーポン"])
+    cp_types = np.array(["対象商品10%OFF", "対象ブランド500円OFF",
+                         "全品送料無料", "会員限定 全品5%OFF"])
     df["施策種類"] = np.select(
         [df["promo_type"].eq("ポイント"), df["promo_type"].eq("クーポン")],
         [pt_types[n % 4], cp_types[(n // 5) % 4]], default="-")
+    # 施策分類：商品別クーポン／総額クーポン／ポイント
+    item_cp = ["対象商品10%OFF", "対象ブランド500円OFF"]
+    df["施策分類"] = np.select(
+        [df["promo_type"].eq("ポイント"),
+         df["promo_type"].eq("クーポン") & df["施策種類"].isin(item_cp),
+         df["promo_type"].eq("クーポン")],
+        ["ポイント施策", "商品別クーポン施策", "総額クーポン施策"], default="-")
     return df, []
 
 
@@ -238,9 +246,11 @@ def qs_style(chart):
         .configure_axis(
             labelColor="#16191f", titleColor="#16191f",
             gridColor="#f2f3f5", domainColor="#e9ebed", tickColor="#e9ebed",
-            labelFontSize=11, titleFontSize=12,
+            labelFontSize=11, titleFontSize=12, labelLimit=0,
         )
-        .configure_axisX(grid=False)
+        .configure_axisX(grid=False, labelLimit=0)
+        .configure_header(title=None, labelColor="#0073bb",
+                          labelFontSize=13, labelFontWeight="bold", labelPadding=6)
         .configure_legend(orient="top", labelColor="#16191f", titleColor="#16191f",
                           labelFontSize=12, symbolType="square", symbolSize=150,
                           symbolStrokeWidth=0)
@@ -316,8 +326,8 @@ def axis_filters(suffix, show_gran=True):
     mask = FULL.copy()
     with st.container(border=True):
         render_title("分析軸・集計単位")
-        st.caption("各項目は未選択の場合「すべて」として扱われます。")
-
+        form = st.form(f"form_{suffix}", border=False)
+    with form:
         # ---- 企業 ----
         st.markdown("<div class='axis-group'>企業</div>", unsafe_allow_html=True)
         c = st.columns(2)
@@ -385,6 +395,7 @@ def axis_filters(suffix, show_gran=True):
                            unsafe_allow_html=True)
             gran = cg[1].radio("集計単位", ["年別", "月別", "日別"], horizontal=True,
                                label_visibility="collapsed", key=f"gran_{suffix}")
+        st.form_submit_button("この条件で表示", type="primary")
     return mask, gran
 
 
@@ -408,11 +419,13 @@ def build_periods(f, gran, suffix):
             return None
         key = f"m_off_{suffix}"
         maxstart = max(0, len(allp) - 12)
-        st.session_state.setdefault(key, maxstart)
-        # フィルタや単位の切替で範囲が変わっても必ず有効範囲にクランプ
-        st.session_state[key] = min(max(int(st.session_state.get(key, maxstart)), 0), maxstart)
+        try:
+            cur = int(st.session_state.get(key, maxstart))
+        except (TypeError, ValueError):
+            cur = maxstart
+        st.session_state[key] = min(max(cur, 0), maxstart)
         start = st.session_state[key]
-        view = allp[start:start + 12]
+        view = allp[start:start + 12] if start < len(allp) else allp[-12:]
         if not view:
             return None
         xlabels = [f"{p[:4]}/{int(p[5:7])}月" for p in view]
@@ -432,6 +445,25 @@ def build_periods(f, gran, suffix):
     view = [f"{selm}-{d:02d}" for d in range(1, ndays + 1)]
     xlabels = [str(d) for d in range(1, ndays + 1)]
     return fd, view, xlabels, key, f"{y_dt}年{mo_dt}月"
+
+
+# ==================== 期間レンジ選択（開始月〜終了月） ====================
+ALL_MONTHS = sorted(df["order_date"].dt.strftime("%Y-%m").unique())
+
+
+def month_range_selector(key, label="分析期間"):
+    """開始月と終了月を選んで期間を絞る。逆転入力は自動で入れ替え。"""
+    def disp(p):
+        return f"{p[:4]}年{int(p[5:7])}月"
+    c = st.columns([2, 2, 5])
+    s = c[0].selectbox(f"{label}：開始月", ALL_MONTHS, index=0,
+                       key=f"{key}_start", format_func=disp)
+    e = c[1].selectbox(f"{label}：終了月", ALL_MONTHS, index=len(ALL_MONTHS) - 1,
+                       key=f"{key}_end", format_func=disp)
+    if s > e:
+        s, e = e, s
+    ym = df["order_date"].dt.strftime("%Y-%m")
+    return df[(ym >= s) & (ym <= e)], f"{disp(s)}〜{disp(e)}", s, e
 
 
 # ==================== タブ構成 ====================
@@ -587,7 +619,7 @@ with tab_yj:
                     tooltip=[alt.Tooltip("period:N", title="期間"),
                              alt.Tooltip("差分:Q", format="+,.1f", title="目標差分(百万円)")],
                 )
-                prog = qs_style(alt.layer(bars, line, diff_tx)
+                prog = qs_style(alt.layer(alt.layer(bars, line), diff_tx)
                                 .resolve_scale(color="independent").properties(height=300))
                 chart_with_nav(prog, show_nav_yj, "yj_prog", spacer_px=110)
 
@@ -667,346 +699,335 @@ with tab_yj:
 
 # ---------------- 販促結果タブ ----------------
 with tab_hs:
-    digest_ui_hs = st.empty()
-    m_hs, gran_hs = axis_filters("hs")
-    f_hs = df[m_hs]
+    f_hs = df
 
-    periods_hs = build_periods(f_hs, gran_hs, "hs")
-    if f_hs.empty or periods_hs is None:
-        st.warning("条件に合うデータがありません。分析軸の絞り込みを緩めてください。")
-    else:
+    # --- 今月のダイジェスト（最新月固定） ---
+    render_title("今月のダイジェスト（最新月固定）")
+    cur_m = f_hs["order_date"].max().to_period("M")
+    f_cur = f_hs[f_hs["order_date"].dt.to_period("M") == cur_m]
+
+    budget_total = sum(BUDGET_M.values())
+    fp = f_cur[f_cur["promo_type"] == "ポイント"]["discount_amount"].sum()
+    fc = f_cur[f_cur["promo_type"] == "クーポン"]["discount_amount"].sum()
+    grant_total = f_cur["discount_amount"].sum()
+    total_sales = f_cur["sales_amount"].sum()
+    promo_sales = f_cur[f_cur["promo_type"] != "なし"]["sales_amount"].sum()
+
+    k = st.columns([1, 2.2, 1])
+    k[0].metric("販促費予算 合計", man(budget_total))
+    grant_ratio = grant_total / budget_total * 100 if budget_total else 0
+    k[1].markdown(
+        f"""<div class="custom-metric">
+        <p class="custom-metric-label">販促費付与額 合計（予算比 {grant_ratio:.1f}%）</p>
+        <div style="display:flex; align-items:baseline; gap:22px; flex-wrap:wrap;">
+          <div style="font-size:1.6rem; font-weight:700; color:#16191f;">{man(grant_total)}</div>
+          <div style="font-size:0.95rem; color:#5f6b7a; border-left:1px solid #e9ebed; padding-left:18px;">
+            内訳：ポイント付与額 <b style="color:#16191f;">{man(fp)}</b>
+            ／ クーポン付与額 <b style="color:#16191f;">{man(fc)}</b>
+          </div>
+        </div></div>""",
+        unsafe_allow_html=True)
+    k[2].metric("施策経由 売上比率",
+                f"{promo_sales/total_sales*100 if total_sales else 0:.1f}%")
+    st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
+
+    # ============ サイト内インセンティブ（表示・集計単位つき） ============
+    with st.container(border=True):
+        render_title("サイト内インセンティブ")
+
+        cg = st.columns([1.2, 6])
+        cg[0].markdown("<div style='font-weight:700; padding-top:8px; color:#16191f;'>"
+                       "表示・集計単位：</div>", unsafe_allow_html=True)
+        gran_hs = cg[1].radio("集計単位", ["年別", "月別", "日別"], horizontal=True,
+                              label_visibility="collapsed", key="gran_hs")
+
+        periods_hs = build_periods(f_hs, gran_hs, "hs")
         fd_hs, view_hs, xlabels_hs, show_nav_hs, nav_label_hs = periods_hs
         f_view = fd_hs[fd_hs["_p"].isin(view_hs)]
+        lab_map = dict(zip(view_hs, xlabels_hs))
+        months_present_hs = sorted(f_hs["order_date"].dt.strftime("%Y-%m").unique())
 
-        if f_view.empty:
-            st.info("選択された期間（" + nav_label_hs + "）にデータがありません。期間を移動してください。")
+        def budget_for(p, name):
+            """期間pに対応する予算額（年別＝当年の月数分、月別＝月次、日別＝日割り）"""
+            if gran_hs == "年別":
+                mons = [m for m in months_present_hs if m[:4] == p[:4]]
+                return BUDGET_M[name] * max(len(mons), 1)
+            if gran_hs == "月別":
+                return BUDGET_M[name]
+            y_, mo_ = int(p[:4]), int(p[5:7])
+            return BUDGET_M[name] / calendar.monthrange(y_, mo_)[1]
+
+        used_tbl = (f_view[f_view["promo_type"].isin(["ポイント", "クーポン"])]
+                    .groupby(["_p", "promo_type"])["discount_amount"].sum())
+
+        inc_rows = []
+        for p in view_hs:
+            for name in ["ポイント", "クーポン"]:
+                b = budget_for(p, name)
+                u = float(used_tbl.get((p, name), 0.0))
+                inc_rows.append({"period": lab_map[p], "施策": name,
+                                 "区分": f"{name}：利用額", "金額": u / 10000, "順": 0})
+                inc_rows.append({"period": lab_map[p], "施策": name,
+                                 "区分": f"{name}：予算残",
+                                 "金額": max(b - u, 0) / 10000, "順": 1})
+        inc_long = pd.DataFrame(inc_rows)
+
+        sub_head("予算額・利用額（予算までの残り）")
+        inc_dom = ["ポイント：利用額", "ポイント：予算残",
+                   "クーポン：利用額", "クーポン：予算残"]
+        inc_rng = [BLUE, "#bfd9ef", AMBER, "#f2ddc2"]
+        inc_chart = alt.Chart(inc_long).mark_bar().encode(
+            x=alt.X("period:N", sort=None, title=None, axis=period_axis()),
+            xOffset=alt.XOffset("施策:N", scale=alt.Scale(domain=["ポイント", "クーポン"])),
+            y=alt.Y("金額:Q", stack="zero", title="金額（万円）", axis=alt.Axis(format=",.1f")),
+            color=alt.Color("区分:N", title=None,
+                            scale=alt.Scale(domain=inc_dom, range=inc_rng)),
+            order=alt.Order("順:Q"),
+            tooltip=[alt.Tooltip("period:N", title="期間"),
+                     alt.Tooltip("施策:N"),
+                     alt.Tooltip("区分:N"),
+                     alt.Tooltip("金額:Q", format=",.1f", title="金額(万円)")],
+        ).properties(height=300)
+        chart_with_nav(qs_style(inc_chart), show_nav_hs, "hs_inc", spacer_px=110)
+
+        sub_head("キャンペーン経由 売上・粗利（全体に対する構成）")
+        seg_map2 = {"なし": "通常（施策なし）", "ポイント": "ポイント経由",
+                    "クーポン": "クーポン経由"}
+        seg_order2 = ["ポイント経由", "クーポン経由", "通常（施策なし）"]
+        agg_seg = (f_view.assign(区分=f_view["promo_type"].map(seg_map2))
+                   .groupby(["_p", "区分"])
+                   .agg(売上=("sales_amount", "sum"), 粗利=("粗利", "sum"))
+                   .reset_index())
+        seg_long = agg_seg.melt(id_vars=["_p", "区分"], value_vars=["売上", "粗利"],
+                                var_name="指標", value_name="金額")
+        seg_long = seg_long[seg_long["_p"].isin(view_hs)]
+        seg_long["period"] = seg_long["_p"].map(lab_map)
+        seg_long["金額"] = seg_long["金額"] / 10000
+        seg_long["順"] = seg_long["区分"].map({s: i for i, s in enumerate(seg_order2)})
+        tot_seg = seg_long.groupby(["_p", "指標"])["金額"].transform("sum")
+        seg_long["構成比"] = np.where(tot_seg > 0, seg_long["金額"] / tot_seg * 100, 0)
+        seg_chart = alt.Chart(seg_long).mark_bar().encode(
+            x=alt.X("period:N", sort=None, title=None, axis=period_axis()),
+            xOffset=alt.XOffset("指標:N", scale=alt.Scale(domain=["売上", "粗利"])),
+            y=alt.Y("金額:Q", stack="zero", title="金額（万円）", axis=alt.Axis(format=",.0f")),
+            color=alt.Color("区分:N", title=None,
+                            scale=alt.Scale(domain=seg_order2, range=[BLUE, AMBER, GRAY])),
+            order=alt.Order("順:Q"),
+            tooltip=[alt.Tooltip("period:N", title="期間"),
+                     alt.Tooltip("指標:N"),
+                     alt.Tooltip("区分:N"),
+                     alt.Tooltip("金額:Q", format=",.0f", title="金額(万円)"),
+                     alt.Tooltip("構成比:Q", format=".1f", title="構成比(%)")],
+        ).properties(height=300)
+        chart_with_nav(qs_style(seg_chart), show_nav_hs, "hs_seg", spacer_px=110)
+
+    # ============ 分析期間（施策別の内訳・流入元 共通） ============
+    f_span, sel_span, _, _ = month_range_selector("hs_span",
+                                                  "分析期間（施策別の内訳・流入元）")
+
+    # ============ 施策別の内訳（散布図：粗利 vs 販促コスト） ============
+    with st.container(border=True):
+        render_title(f"施策別の内訳（ポイント・クーポン種類別）｜{sel_span}")
+
+        camp_q = (f_span[f_span["promo_type"] != "なし"]
+                  .assign(四半期=f_span[f_span["promo_type"] != "なし"]["order_date"]
+                          .dt.to_period("Q").astype(str).str.replace("Q", "年Q"))
+                  .groupby(["施策分類", "施策種類", "四半期"])
+                  .agg(粗利=("粗利", "sum"), 付与額=("discount_amount", "sum"))
+                  .reset_index())
+        if camp_q.empty:
+            st.info("対象期間に施策経由の売上がありません。")
         else:
-            # --- 今月のダイジェスト（最新月固定） ---
-            with digest_ui_hs.container(border=False):
-                render_title("今月のダイジェスト（最新月固定）")
-                cur_m = f_hs["order_date"].max().to_period("M")
-                f_cur = f_hs[f_hs["order_date"].dt.to_period("M") == cur_m]
+            camp_q["コスト万"] = camp_q["付与額"] / 10000
+            camp_q["粗利万"] = camp_q["粗利"] / 10000
+            camp_q["ROI"] = np.where(camp_q["付与額"] > 0,
+                                     (camp_q["粗利"] - camp_q["付与額"])
+                                     / camp_q["付与額"] * 100, 0)
+            M = float(max(camp_q["コスト万"].max(), camp_q["粗利万"].max())) * 1.12
+            M = max(M, 1.0)
 
-                budget_total = sum(BUDGET_M.values())               # 販促費予算合計（月次）
-                fp = f_cur[f_cur["promo_type"] == "ポイント"]["discount_amount"].sum()
-                fc = f_cur[f_cur["promo_type"] == "クーポン"]["discount_amount"].sum()
-                grant_total = f_cur["discount_amount"].sum()        # 販促費付与額合計
-                total_sales = f_cur["sales_amount"].sum()
-                promo_sales = f_cur[f_cur["promo_type"] != "なし"]["sales_amount"].sum()
+            bg = pd.DataFrame({"x": [0.0, M], "top": [M, M], "zero": [0.0, 0.0]})
+            g_area = alt.Chart(bg).mark_area(color="#e3f2df", opacity=0.85).encode(
+                x=alt.X("x:Q", scale=alt.Scale(domain=[0, M], nice=False),
+                        title="販促コスト（付与額・万円）", axis=alt.Axis(format=",.0f")),
+                y=alt.Y("x:Q", scale=alt.Scale(domain=[0, M], nice=False),
+                        title="施策経由 粗利（万円）", axis=alt.Axis(format=",.0f")),
+                y2="top:Q")
+            r_area = alt.Chart(bg).mark_area(color="#fbe4e4", opacity=0.85).encode(
+                x="x:Q", y=alt.Y("zero:Q"), y2="x:Q")
+            diag = alt.Chart(bg).mark_line(color="#5f6b7a", strokeWidth=2).encode(
+                x="x:Q", y="x:Q")
 
-                k = st.columns([1, 2.2, 1])
-                k[0].metric("販促費予算 合計", man(budget_total))
-                grant_ratio = grant_total / budget_total * 100 if budget_total else 0
-                k[1].markdown(
-                    f"""<div class="custom-metric">
-                    <p class="custom-metric-label">販促費付与額 合計（予算比 {grant_ratio:.1f}%）</p>
-                    <div style="display:flex; align-items:baseline; gap:22px; flex-wrap:wrap;">
-                      <div style="font-size:1.6rem; font-weight:700; color:#16191f;">{man(grant_total)}</div>
-                      <div style="font-size:0.95rem; color:#5f6b7a; border-left:1px solid #e9ebed; padding-left:18px;">
-                        内訳：ポイント付与額 <b style="color:#16191f;">{man(fp)}</b>
-                        ／ クーポン付与額 <b style="color:#16191f;">{man(fc)}</b>
-                      </div>
-                    </div></div>""",
-                    unsafe_allow_html=True)
-                k[2].metric("施策経由 売上比率",
-                            f"{promo_sales/total_sales*100 if total_sales else 0:.1f}%")
-                st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
+            lbl_l = pd.DataFrame({"x": [M * 0.03], "y": [M * 0.96],
+                                  "t": ["高ROI領域（低コストで儲かる施策）"]})
+            lbl_r = pd.DataFrame({"x": [M * 0.97], "y": [M * 0.05],
+                                  "t": ["低ROI領域（コストの割に儲からない施策）"]})
+            zone_tx = alt.layer(
+                alt.Chart(lbl_l).mark_text(fontSize=12, fontWeight="bold",
+                                           color="#3d4653", align="left").encode(
+                    x="x:Q", y="y:Q", text="t:N"),
+                alt.Chart(lbl_r).mark_text(fontSize=12, fontWeight="bold",
+                                           color="#3d4653", align="right").encode(
+                    x="x:Q", y="y:Q", text="t:N"),
+            )
 
-            order_cnt = f_view["order_id"].nunique()
-            AOV_view = f_view["sales_amount"].sum() / order_cnt if order_cnt else 0
-            months_in_view = max(f_view["order_date"].dt.to_period("M").nunique(), 1)
+            cls_dom = ["商品別クーポン施策", "総額クーポン施策", "ポイント施策"]
+            cls_rng = ["#4c78c8", "#3f9c4f", "#e5a13c"]
+            pts = alt.Chart(camp_q).mark_circle(size=170, opacity=0.85,
+                                                stroke="#ffffff", strokeWidth=1).encode(
+                x=alt.X("コスト万:Q"),
+                y=alt.Y("粗利万:Q"),
+                color=alt.Color("施策分類:N", title=None,
+                                scale=alt.Scale(domain=cls_dom, range=cls_rng)),
+                tooltip=[alt.Tooltip("施策種類:N", title="施策名"),
+                         alt.Tooltip("施策分類:N", title="分類"),
+                         alt.Tooltip("四半期:N", title="期間"),
+                         alt.Tooltip("コスト万:Q", format=",.1f", title="販促コスト(万円)"),
+                         alt.Tooltip("粗利万:Q", format=",.1f", title="経由粗利(万円)"),
+                         alt.Tooltip("ROI:Q", format=",.0f", title="ROI(%)")],
+            )
+            scatter = qs_style(alt.layer(g_area, r_area, diag, zone_tx, pts)
+                               .properties(height=430))
+            st.altair_chart(scatter, use_container_width=True)
 
-            st.markdown(
-                "<div style='color:#8a94a3; font-size:12px; margin:2px 0 10px;'>"
-                "売上・粗利・付与額は実データ。予算／セッション／CVR／配信・広告コスト／ROAS／"
-                "退会数／カゴ落ち／会員数は元データがないためデモ用の推計値です。</div>",
-                unsafe_allow_html=True)
+    # ============ 流入元 ============
+    with st.container(border=True):
+        render_title(f"流入元｜{sel_span}")
 
-            # -------- 大分類1：サイト内インセンティブ --------
-            with st.container(border=True):
-                render_title("サイト内インセンティブ")
+        order_cnt = f_span["order_id"].nunique()
+        AOV_span = f_span["sales_amount"].sum() / order_cnt if order_cnt else 0
 
-                inc_rows = []
-                for name in ["ポイント", "クーポン"]:
-                    sub = f_view[f_view["promo_type"] == name]
-                    used = sub["discount_amount"].sum()
-                    budget = BUDGET_M[name] * months_in_view
-                    inc_rows.append({"施策": name,
-                                     "予算額": budget / 10000,
-                                     "利用額": used / 10000,
-                                     "予算残": max(budget - used, 0) / 10000})
-                inc_df = pd.DataFrame(inc_rows)
+        CH_CVR = {"メルマガ": 0.040, "Google": 0.025, "LINE": 0.045, "Push通知": 0.030}
+        CH_DISP = {"メルマガ": "メルマガ", "Google": "Google広告",
+                   "LINE": "LINE", "Push通知": "Push通知"}
+        SRC_ORDER = ["特集", "バナー", "メルマガ", "Google広告", "LINE", "Push通知"]
 
-                ic = st.columns(2)
+        src_rows = []
+        feat = f_span[f_span["feature_tag"] != "なし"]
+        f_ord = feat["order_id"].nunique()
+        f_sess = round(f_ord / 0.035) if f_ord else 0
+        src_rows.append({"流入元": "特集",
+                         "売上": feat["sales_amount"].sum() / 10000,
+                         "粗利": feat["粗利"].sum() / 10000,
+                         "セッション": f_sess,
+                         "CVR": round(f_ord / f_sess * 100, 2) if f_sess else 0,
+                         "ROAS": None})
+        b_sess = round(f_sess * 0.6)
+        b_ord = round(b_sess * 0.02)
+        src_rows.append({"流入元": "バナー",
+                         "売上": b_ord * AOV_span / 10000,
+                         "粗利": b_ord * AOV_span * 0.36 / 10000,
+                         "セッション": b_sess,
+                         "CVR": 2.0, "ROAS": None})
+        # 想定ROAS（コスト＝売上÷想定ROASで逆算。実コストデータ取得後に置換）
+        TGT_ROAS = {"メルマガ": 4.2, "Google": 0.95, "LINE": 3.6, "Push通知": 4.8}
+        for ch, cvr0 in CH_CVR.items():
+            sub = f_span[f_span["channel"] == ch]
+            o = sub["order_id"].nunique()
+            s = sub["sales_amount"].sum()
+            g = sub["粗利"].sum()
+            sess0 = round(o / cvr0) if o else 0
+            cost = round(s / TGT_ROAS[ch]) if s else 0
+            src_rows.append({"流入元": CH_DISP[ch],
+                             "売上": s / 10000, "粗利": g / 10000,
+                             "セッション": sess0,
+                             "CVR": round(o / sess0 * 100, 2) if sess0 else 0,
+                             "ROAS": round(s / cost * 100) if cost else None})
+        src_df = pd.DataFrame(src_rows)
 
-                # グラフ1：利用額＋予算残の積み上げ（合計＝予算額）。残額をラベル表示
-                with ic[0]:
-                    sub_head("予算額・利用額（予算までの残り）")
-                    amt_long = inc_df.melt(id_vars=["施策"], value_vars=["利用額", "予算残"],
-                                           var_name="種別", value_name="金額")
-                    amt_long["順"] = amt_long["種別"].map({"利用額": 0, "予算残": 1})
-                    bars1 = alt.Chart(amt_long).mark_bar().encode(
-                        x=alt.X("施策:N", title=None, axis=alt.Axis(labelAngle=0)),
-                        y=alt.Y("金額:Q", stack="zero", title="金額（万円）",
-                                axis=alt.Axis(format=",.0f")),
-                        color=alt.Color("種別:N", title=None,
-                                        scale=alt.Scale(domain=["利用額", "予算残"],
-                                                        range=[BLUE, "#dfe3e8"])),
-                        order=alt.Order("順:Q"),
-                        tooltip=[alt.Tooltip("施策:N"), alt.Tooltip("種別:N"),
-                                 alt.Tooltip("金額:Q", format=",.1f", title="金額(万円)")],
-                    )
-                    rest_tx = alt.Chart(inc_df).mark_text(
-                        dy=-10, fontWeight="bold", color="#16191f",
-                    ).encode(
-                        x=alt.X("施策:N"),
-                        y=alt.Y("予算額:Q"),
-                        text=alt.Text("予算残:Q", format=",.1f"),
-                        tooltip=[alt.Tooltip("施策:N"),
-                                 alt.Tooltip("予算残:Q", format=",.1f", title="予算残(万円)")],
-                    )
-                    rest_lb = alt.Chart(inc_df).mark_text(
-                        dy=-26, fontSize=10.5, color="#5f6b7a",
-                    ).encode(x=alt.X("施策:N"), y=alt.Y("予算額:Q"),
-                             text=alt.value("残り（万円）"))
-                    g1 = qs_style(alt.layer(bars1, rest_tx, rest_lb).properties(height=300))
-                    st.altair_chart(g1, use_container_width=True)
+        wrap_expr = ("length(datum.label)>5 ? "
+                     "[substring(datum.label,0,4), substring(datum.label,4)] "
+                     ": datum.label")
 
-                # グラフ2：全体に対する施策経由の売上・粗利（積み上げ）
-                with ic[1]:
-                    sub_head("キャンペーン経由 売上・粗利（全体に対する構成）")
-                    seg_rows = []
-                    seg_map = {"なし": "通常（施策なし）", "ポイント": "ポイント経由", "クーポン": "クーポン経由"}
-                    tot = {"売上": f_view["sales_amount"].sum(), "粗利": f_view["粗利"].sum()}
-                    for raw, seg in seg_map.items():
-                        sub = f_view[f_view["promo_type"] == raw]
-                        for metric, col in [("売上", "sales_amount"), ("粗利", "粗利")]:
-                            v = sub[col].sum()
-                            seg_rows.append({
-                                "指標": metric, "区分": seg, "金額": v / 10000,
-                                "構成比": v / tot[metric] * 100 if tot[metric] else 0,
-                            })
-                    seg_df = pd.DataFrame(seg_rows)
-                    seg_order = ["ポイント経由", "クーポン経由", "通常（施策なし）"]
-                    seg_df["順"] = seg_df["区分"].map({s: i for i, s in enumerate(seg_order)})
+        sc = st.columns(3)
+        with sc[0]:
+            sub_head("売上・粗利")
+            sg = src_df.melt(id_vars=["流入元"], value_vars=["売上", "粗利"],
+                             var_name="指標", value_name="金額")
+            ch1 = alt.Chart(sg).mark_bar().encode(
+                x=alt.X("流入元:N", sort=SRC_ORDER, title=None,
+                        axis=alt.Axis(labelAngle=0, labelLimit=0, labelExpr=wrap_expr)),
+                xOffset=alt.XOffset("指標:N", sort=["売上", "粗利"]),
+                y=alt.Y("金額:Q", title="金額（万円）", axis=alt.Axis(format=",.0f")),
+                color=alt.Color("指標:N", title=None,
+                                scale=alt.Scale(domain=["売上", "粗利"],
+                                                range=[BLUE, GREEN])),
+                tooltip=[alt.Tooltip("流入元:N"), alt.Tooltip("指標:N"),
+                         alt.Tooltip("金額:Q", format=",.0f", title="金額(万円)")],
+            ).properties(height=280)
+            st.altair_chart(qs_style(ch1), use_container_width=True)
 
-                    g2 = alt.Chart(seg_df).mark_bar().encode(
-                        x=alt.X("指標:N", sort=["売上", "粗利"], title=None,
-                                axis=alt.Axis(labelAngle=0)),
-                        y=alt.Y("金額:Q", stack="zero", title="金額（万円）",
-                                axis=alt.Axis(format=",.0f")),
-                        color=alt.Color("区分:N", title=None,
-                                        scale=alt.Scale(domain=seg_order,
-                                                        range=[BLUE, AMBER, GRAY])),
-                        order=alt.Order("順:Q"),
-                        tooltip=[alt.Tooltip("指標:N"), alt.Tooltip("区分:N"),
-                                 alt.Tooltip("金額:Q", format=",.0f", title="金額(万円)"),
-                                 alt.Tooltip("構成比:Q", format=".1f", title="構成比(%)")],
-                    ).properties(height=300)
-                    st.altair_chart(qs_style(g2), use_container_width=True)
+        with sc[1]:
+            sub_head("セッション流入数・CVR")
+            sess_cvr = src_df.melt(id_vars=["流入元"], value_vars=["セッション", "CVR"],
+                                   var_name="指標", value_name="値")
+            xenc2 = alt.X("流入元:N", sort=SRC_ORDER, title=None,
+                          axis=alt.Axis(labelAngle=0, labelLimit=0, labelExpr=wrap_expr))
+            xoff2 = alt.XOffset("指標:N", scale=alt.Scale(domain=["セッション", "CVR"]))
+            sess_bar = alt.Chart(sess_cvr).transform_filter(
+                "datum['指標'] === 'セッション'"
+            ).mark_bar().encode(
+                x=xenc2, xOffset=xoff2,
+                y=alt.Y("値:Q", title="セッション流入数（回）", axis=alt.Axis(format=",.0f")),
+                color=alt.Color("指標:N", title=None,
+                                scale=alt.Scale(domain=["セッション", "CVR"],
+                                                range=[LIGHT, AMBER])),
+                tooltip=[alt.Tooltip("流入元:N"),
+                         alt.Tooltip("値:Q", format=",.0f", title="セッション(回)")],
+            )
+            cvr_bar = alt.Chart(sess_cvr).transform_filter(
+                "datum['指標'] === 'CVR'"
+            ).mark_bar().encode(
+                x=xenc2, xOffset=xoff2,
+                y=alt.Y("値:Q", title="CVR(%)", axis=alt.Axis(format=",.1f")),
+                color=alt.Color("指標:N", title=None,
+                                scale=alt.Scale(domain=["セッション", "CVR"],
+                                                range=[LIGHT, AMBER])),
+                tooltip=[alt.Tooltip("流入元:N"),
+                         alt.Tooltip("値:Q", format=".2f", title="CVR(%)")],
+            )
+            cvr_tx2 = alt.Chart(sess_cvr).transform_filter(
+                "datum['指標'] === 'CVR'"
+            ).mark_text(dy=-8, color="#b25a1f", fontWeight="bold", fontSize=10).encode(
+                x=xenc2, xOffset=xoff2, y=alt.Y("値:Q"),
+                text=alt.Text("値:Q", format=".1f"))
+            ch2 = qs_style(alt.layer(sess_bar, alt.layer(cvr_bar, cvr_tx2))
+                           .resolve_scale(y="independent").properties(height=280))
+            st.altair_chart(ch2, use_container_width=True)
 
-            # -------- 大分類2：施策別の内訳（ポイント・クーポン種類別） --------
-            with st.container(border=True):
-                render_title("施策別の内訳（ポイント・クーポン種類別）")
-
-                camp = (f_view[f_view["promo_type"] != "なし"]
-                        .groupby(["promo_type", "施策種類"])
-                        .agg(売上=("sales_amount", "sum"), 粗利=("粗利", "sum"),
-                             付与額=("discount_amount", "sum"))
-                        .reset_index())
-                if camp.empty:
-                    st.info("対象期間に施策経由の売上がありません。")
-                else:
-                    camp["ラベル"] = camp["promo_type"] + "/" + camp["施策種類"]
-                    camp = camp.sort_values(["promo_type", "売上"],
-                                            ascending=[True, False])
-                    lab_order = list(camp["ラベル"])
-                    camp["ROI"] = np.where(camp["付与額"] > 0,
-                                           camp["売上"] / camp["付与額"] * 100, 0)
-
-                    cp = st.columns(2)
-                    with cp[0]:
-                        sub_head("種類別 売上・粗利")
-                        cl = camp.melt(id_vars=["ラベル"], value_vars=["売上", "粗利"],
-                                       var_name="指標", value_name="金額")
-                        cl["金額"] = cl["金額"] / 10000
-                        cchart = alt.Chart(cl).mark_bar().encode(
-                            x=alt.X("ラベル:N", sort=lab_order, title=None,
-                                    axis=period_axis()),
-                            xOffset=alt.XOffset("指標:N", sort=["売上", "粗利"]),
-                            y=alt.Y("金額:Q", title="金額（万円）",
-                                    axis=alt.Axis(format=",.0f")),
-                            color=alt.Color("指標:N", title=None,
-                                            scale=alt.Scale(domain=["売上", "粗利"],
-                                                            range=[BLUE, GREEN])),
-                            tooltip=[alt.Tooltip("ラベル:N", title="施策"),
-                                     alt.Tooltip("指標:N"),
-                                     alt.Tooltip("金額:Q", format=",.0f", title="金額(万円)")],
-                        ).properties(height=300)
-                        st.altair_chart(qs_style(cchart), use_container_width=True)
-
-                    with cp[1]:
-                        sub_head("種類別 付与額・ROI（売上÷付与額）")
-                        camp2 = camp.assign(付与額万=camp["付与額"] / 10000)
-                        gb = alt.Chart(camp2).mark_bar(color=AMBER).encode(
-                            x=alt.X("ラベル:N", sort=lab_order, title=None,
-                                    axis=period_axis()),
-                            y=alt.Y("付与額万:Q", title="付与額（万円）",
-                                    axis=alt.Axis(format=",.1f")),
-                            tooltip=[alt.Tooltip("ラベル:N", title="施策"),
-                                     alt.Tooltip("付与額万:Q", format=",.1f", title="付与額(万円)")],
-                        )
-                        gpt = alt.Chart(camp2).mark_point(
-                            size=110, filled=True, color=PURPLE,
-                            stroke="#ffffff", strokeWidth=1.3,
-                        ).encode(
-                            x=alt.X("ラベル:N", sort=lab_order),
-                            y=alt.Y("ROI:Q", title="ROI（%）", axis=alt.Axis(format=",.0f")),
-                            tooltip=[alt.Tooltip("ラベル:N", title="施策"),
-                                     alt.Tooltip("ROI:Q", format=",.0f", title="ROI(%)")],
-                        )
-                        g4 = qs_style(alt.layer(gb, gpt)
-                                      .resolve_scale(y="independent").properties(height=300))
-                        st.altair_chart(g4, use_container_width=True)
-
-            # -------- 大分類2：流入元（指標別に流入元を比較） --------
-            with st.container(border=True):
-                render_title("流入元")
-
-                # 中分類ごとの想定CVR（セッションを実受注数から逆算するための推計値）
-                CH_CVR = {"メルマガ": 0.040, "Google": 0.025, "LINE": 0.045, "Push通知": 0.030}
-                CH_DISP = {"メルマガ": "メルマガ", "Google": "Google広告",
-                           "LINE": "LINE", "Push通知": "Push通知"}
-                SRC_ORDER = ["特集", "バナー", "メルマガ", "Google広告", "LINE", "Push通知"]
-
-                src_rows = []
-                feat = f_view[f_view["feature_tag"] != "なし"]
-                f_ord = feat["order_id"].nunique()
-                f_sess = round(f_ord / 0.035) if f_ord else 0
-                src_rows.append({"流入元": "特集",
-                                 "売上": feat["sales_amount"].sum() / 10000,
-                                 "粗利": feat["粗利"].sum() / 10000,
-                                 "セッション": f_sess,
-                                 "CVR": round(f_ord / f_sess * 100, 2) if f_sess else 0,
-                                 "ROAS": None})
-                b_sess = round(f_sess * 0.6)
-                b_ord = round(b_sess * 0.02)
-                src_rows.append({"流入元": "バナー",
-                                 "売上": b_ord * AOV_view / 10000,
-                                 "粗利": b_ord * AOV_view * 0.36 / 10000,
-                                 "セッション": b_sess,
-                                 "CVR": 2.0, "ROAS": None})
-                for ch, cvr0 in CH_CVR.items():
-                    sub = f_view[f_view["channel"] == ch]
-                    o = sub["order_id"].nunique()
-                    s = sub["sales_amount"].sum()
-                    g = sub["粗利"].sum()
-                    sess0 = round(o / cvr0) if o else 0
-                    if ch == "Google":
-                        cost = round(sess0 * 45)
-                    else:
-                        crate = {"メルマガ": 0.12, "LINE": 0.18, "Push通知": 0.20}[ch]
-                        unit = {"メルマガ": 2.5, "LINE": 3.3, "Push通知": 2.5}[ch]
-                        cost = round(round(sess0 / crate) * unit) if sess0 else 0
-                    src_rows.append({"流入元": CH_DISP[ch],
-                                     "売上": s / 10000, "粗利": g / 10000,
-                                     "セッション": sess0,
-                                     "CVR": round(o / sess0 * 100, 2) if sess0 else 0,
-                                     "ROAS": round(s / cost * 100) if cost else None})
-                src_df = pd.DataFrame(src_rows)
-
-                sc = st.columns(3)
-                # 売上・粗利（グループ棒）
-                with sc[0]:
-                    sub_head("売上・粗利")
-                    sg = src_df.melt(id_vars=["流入元"], value_vars=["売上", "粗利"],
-                                     var_name="指標", value_name="金額")
-                    ch1 = alt.Chart(sg).mark_bar().encode(
-                        x=alt.X("流入元:N", sort=SRC_ORDER, title=None,
-                                axis=alt.Axis(labelAngle=0,
-                                              labelExpr="length(datum.label)>5 ? "
-                                                        "[slice(datum.label,0,4), slice(datum.label,4)] "
-                                                        ": datum.label")),
-                        xOffset=alt.XOffset("指標:N", sort=["売上", "粗利"]),
-                        y=alt.Y("金額:Q", title="金額（万円）", axis=alt.Axis(format=",.0f")),
-                        color=alt.Color("指標:N", title=None,
-                                        scale=alt.Scale(domain=["売上", "粗利"],
-                                                        range=[BLUE, GREEN])),
-                        tooltip=[alt.Tooltip("流入元:N"), alt.Tooltip("指標:N"),
-                                 alt.Tooltip("金額:Q", format=",.0f", title="金額(万円)")],
-                    ).properties(height=280)
-                    st.altair_chart(qs_style(ch1), use_container_width=True)
-
-                # セッション流入数 ＋ CVR（2軸）
-                with sc[1]:
-                    sub_head("セッション流入数・CVR")
-                    xenc = alt.X("流入元:N", sort=SRC_ORDER, title=None,
-                                 axis=alt.Axis(labelAngle=0,
-                                               labelExpr="length(datum.label)>5 ? "
-                                                         "[slice(datum.label,0,4), slice(datum.label,4)] "
-                                                         ": datum.label"))
-                    sess_bar = alt.Chart(src_df).mark_bar(color=LIGHT).encode(
-                        x=xenc,
-                        y=alt.Y("セッション:Q", title="セッション流入数（回）",
-                                axis=alt.Axis(format=",.0f")),
-                        tooltip=[alt.Tooltip("流入元:N"),
-                                 alt.Tooltip("セッション:Q", format=",.0f",
-                                             title="セッション(回)")],
-                    )
-                    cvr_pt = alt.Chart(src_df).mark_line(
-                        strokeWidth=0,
-                        point=alt.OverlayMarkDef(size=110, fill=AMBER,
-                                                 stroke="#ffffff", strokeWidth=1.3),
-                    ).encode(
-                        x=xenc,
-                        y=alt.Y("CVR:Q", title="CVR(%)", axis=alt.Axis(format=",.1f")),
-                        tooltip=[alt.Tooltip("流入元:N"),
-                                 alt.Tooltip("CVR:Q", format=".2f", title="CVR(%)")],
-                    )
-                    cvr_tx = alt.Chart(src_df).mark_text(
-                        dy=-12, color="#b25a1f", fontWeight="bold", fontSize=10,
-                    ).encode(x=xenc, y=alt.Y("CVR:Q"),
-                             text=alt.Text("CVR:Q", format=".1f"))
-                    ch2 = qs_style(alt.layer(sess_bar, cvr_pt, cvr_tx)
-                                   .resolve_scale(y="independent").properties(height=280))
-                    st.altair_chart(ch2, use_container_width=True)
-
-                # ROAS（コストデータのある流入元のみ）
-                with sc[2]:
-                    sub_head("ROAS")
-                    roas_df = src_df[src_df["ROAS"].notna()]
-                    base3 = alt.Chart(roas_df).encode(
-                        x=alt.X("流入元:N", sort=SRC_ORDER, title=None,
-                                axis=alt.Axis(labelAngle=0,
-                                              labelExpr="length(datum.label)>5 ? "
-                                                        "[slice(datum.label,0,4), slice(datum.label,4)] "
-                                                        ": datum.label")),
-                        y=alt.Y("ROAS:Q", title="ROAS（%）", axis=alt.Axis(format=",.0f")),
-                    )
-                    ch3 = alt.layer(
-                        base3.mark_bar(color=PURPLE).encode(
-                            tooltip=[alt.Tooltip("流入元:N"),
-                                     alt.Tooltip("ROAS:Q", format=",.0f", title="ROAS(%)")]),
-                        base3.mark_text(dy=-8, color="#16191f", fontWeight="bold")
-                        .encode(text=alt.Text("ROAS:Q", format=",.0f")),
-                    ).properties(height=280)
-                    st.altair_chart(qs_style(ch3), use_container_width=True)
-                    st.caption("※ 特集・バナーはコストデータがないため対象外")
+        with sc[2]:
+            sub_head("ROAS（売上÷コスト）")
+            roas_df = src_df[src_df["ROAS"].notna()].copy()
+            roas_df["状態"] = np.where(roas_df["ROAS"] >= 100,
+                                     "100%以上（回収）", "100%未満（要改善）")
+            base3 = alt.Chart(roas_df).encode(
+                x=alt.X("流入元:N", sort=SRC_ORDER, title=None,
+                        axis=alt.Axis(labelAngle=0, labelLimit=0, labelExpr=wrap_expr)),
+                y=alt.Y("ROAS:Q", title="ROAS（%）", axis=alt.Axis(format=",.0f")),
+            )
+            rbars = base3.mark_bar().encode(
+                color=alt.Color("状態:N", title=None,
+                                scale=alt.Scale(domain=["100%以上（回収）",
+                                                        "100%未満（要改善）"],
+                                                range=[PURPLE, GAPNEG])),
+                tooltip=[alt.Tooltip("流入元:N"),
+                         alt.Tooltip("ROAS:Q", format=",.0f", title="ROAS(%)")])
+            rline = alt.Chart(pd.DataFrame({"y": [100]})).mark_rule(
+                strokeDash=[4, 3], color="#5f6b7a", strokeWidth=1.5).encode(y="y:Q")
+            rtx = base3.mark_text(dy=-8, color="#16191f", fontWeight="bold",
+                                  fontSize=10).encode(
+                text=alt.Text("ROAS:Q", format=",.0f"))
+            ch3 = qs_style(alt.layer(rbars, rline, rtx).properties(height=280))
+            st.altair_chart(ch3, use_container_width=True)
 
 
 # ---------------- 顧客行動分析タブ ----------------
 with tab_cs:
-    m_cs, _ = axis_filters("cs", show_gran=False)
-    f_cs = df[m_cs]
+    f_cs, cs_label, cs_start, cs_end = month_range_selector("cs_span", "分析期間")
 
     if f_cs.empty:
         st.warning("条件に合うデータがありません。分析軸の絞り込みを緩めてください。")
     else:
-        st.markdown(
-            "<div style='color:#8a94a3; font-size:12px; margin:2px 0 10px;'>"
-            "※ 顧客IDは元データに存在しないため、注文IDから決定論的に生成したデモ値です。"
-            "リピート率・F2転換・LTV・購入間隔・休眠判定・会員数はその推計に基づきます。</div>",
-            unsafe_allow_html=True)
 
         # ---- 顧客行動（カゴ落ち） ----
         cs_order_cnt = f_cs["order_id"].nunique()
@@ -1056,7 +1077,7 @@ with tab_cs:
 
 
         # ---- 顧客単位の集計 ----
-        ref_date = df["order_date"].max()
+        ref_date = f_cs["order_date"].max()
         s_cs = f_cs.sort_values("order_date")
         cust = s_cs.groupby("顧客ID").agg(
             購入回数=("order_id", "nunique"),
@@ -1098,8 +1119,10 @@ with tab_cs:
         k[0].metric("顧客数", f"{n_cust:,} 人")
         k[1].metric("リピート率（2回以上購入）", f"{repeat_rate:.1f}%")
         k[2].metric("F2転換率（90日以内に2回目購入）", f"{f2_rate:.1f}%")
-        k[3].metric("平均LTV（1人あたり累計購入額）", man(ltv_avg))
-        k[4].metric("平均購入間隔", f"{interval_avg:,.0f} 日")
+        k[3].metric("平均LTV（1人あたり累計購入額）",
+                    man(ltv_avg) if pd.notna(ltv_avg) else "-")
+        k[4].metric("平均購入間隔",
+                    f"{interval_avg:,.0f} 日" if pd.notna(interval_avg) else "-")
         st.markdown("<div style='margin-bottom:16px;'></div>", unsafe_allow_html=True)
 
         # ---- リピート構造 ----
@@ -1153,7 +1176,6 @@ with tab_cs:
                         .encode(text=alt.Text("顧客数:Q", format=",.0f")),
                     ).properties(height=280)
                     st.altair_chart(qs_style(chart), use_container_width=True)
-                    st.caption(f"中央値：{f2_days.median():,.0f}日で2回目購入")
 
         # ---- LTV と 休眠/離反 ----
         r2 = st.columns(2)
@@ -1203,13 +1225,17 @@ with tab_cs:
                     .encode(text=alt.Text("顧客数:Q", format=",.0f")),
                 ).properties(height=280)
                 st.altair_chart(qs_style(chart), use_container_width=True)
-                st.caption(f"休眠以上（91日以上購入なし）の割合：{dormant_rate:.1f}%")
 
         # ---- 会員数の増減 ----
         with st.container(border=True):
             render_title("会員数の増減")
 
             mem = member_trend()
+            mem = mem[(mem["month"] >= cs_start) & (mem["month"] <= cs_end)]
+            mem = mem.reset_index(drop=True)
+            if mem.empty:
+                st.info("選択期間に会員データがありません。")
+                st.stop()
             mem["label"] = mem["month"].map(lambda p: f"{p[:4]}/{int(p[5:7])}月")
             flow = mem.melt(id_vars=["label"], value_vars=["新規会員", "退会"],
                             var_name="区分", value_name="人数")
