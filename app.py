@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-# ECダッシュボード（Altair版）
-# ※ グループ棒の xOffset エンコーディングを使うため Altair 5 以上が必要です。
-#    pip install "altair>=5"
 import calendar
 import numpy as np
 import pandas as pd
@@ -131,6 +127,10 @@ TRADE_ORDER = ["在庫型", "受注型", "直送型"]
 CHOPPLE_ORDER = ["通常", "仕入れ"]
 GENDER_ORDER = ["女性", "男性"]
 RANK_ORDER = ["通常", "ゴールド"]
+WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
+
+# 表示・集計単位（時系列：年/クォータ/月/日 ＋ 分布：曜日/時間）
+GRAN_OPTIONS = ["年別", "クォータ別", "月別", "曜日別", "日別", "時間別"]
 
 # 販促の月次計画予算（デモ）：ポイント45万/月、クーポン26万/月
 BUDGET_M = {"ポイント": 450_000, "クーポン": 260_000}
@@ -319,7 +319,7 @@ traffic_all = compute_daily_traffic()
 
 
 # ==================== 分析軸（共通フィルタ） ====================
-def axis_filters(suffix, show_gran=True):
+def axis_filters(suffix):
     """企業／商品／ユーザー情報／流入媒体 に分類した分析軸UI。未選択＝すべて。"""
     mask = FULL.copy()
     with st.container(border=True):
@@ -381,18 +381,17 @@ def axis_filters(suffix, show_gran=True):
         if v_ch:
             mask &= df["channel"].isin(v_ch)
 
-        gran = None
-        if show_gran:
-            st.markdown("<hr style='margin: 8px 0; border: none; border-top: 1px dashed #e9ebed;'>",
-                        unsafe_allow_html=True)
-            cg = st.columns([1, 6])
-            cg[0].markdown("<div style='font-weight:700; padding-top:8px; color:#16191f;'>表示・集計単位：</div>",
-                           unsafe_allow_html=True)
-            gran = cg[1].radio("集計単位", ["年別", "クォータ別", "月別", "日別"],
-                               horizontal=True,
-                               label_visibility="collapsed", key=f"gran_{suffix}")
         st.form_submit_button("この条件で表示", type="primary")
-    return mask, gran
+    return mask
+
+
+# ==================== 表示・集計単位（フォーム外＝即時反映） ====================
+def granularity_control(suffix):
+    """表示・集計単位を1行フル幅で表示（横スクロールなし）。ダイジェスト直下に配置する想定。"""
+    with st.container(border=True):
+        render_title("表示・集計単位")
+        return st.radio("集計単位", GRAN_OPTIONS, horizontal=True,
+                        label_visibility="collapsed", key=f"gran_{suffix}")
 
 
 # ==================== 期間の組み立て（切替時エラー防止） ====================
@@ -438,20 +437,38 @@ def build_periods(f, gran, suffix):
         xlabels = [f"{p[:4]}/{int(p[5:7])}月" for p in view]
         return fd, view, xlabels, key, f"{view[0]}〜{view[-1]}"
 
-    # 日別
+    # ここから下は「月を選び、その月の中を割る」系（日別・曜日別・時間別）
+    # ＜＞ナビで対象月を移動し、曜日別／時間別はその月内で束ねる（分布表示）。
     mkeys = sorted(f["order_date"].dt.strftime("%Y-%m").unique())
     if not mkeys:
         return None
-    key = f"d_off_{suffix}"
+    key = f"mo_off_{suffix}"
     st.session_state.setdefault(key, len(mkeys) - 1)
     st.session_state[key] = min(max(int(st.session_state.get(key, 0)), 0), len(mkeys) - 1)
     selm = mkeys[st.session_state[key]]
     y_dt, mo_dt = int(selm[:4]), int(selm[5:7])
+    fm = f[f["order_date"].dt.strftime("%Y-%m") == selm]
+    if fm.empty:
+        return None
+    nav_label = f"{y_dt}年{mo_dt}月"
+
+    if gran == "曜日別":
+        wd = fm["order_date"].dt.weekday.map(dict(enumerate(WEEKDAY_LABELS)))
+        fd = fm.assign(_p=wd)
+        return fd, WEEKDAY_LABELS, WEEKDAY_LABELS, key, nav_label
+
+    if gran == "時間別":
+        fd = fm.assign(_p=fm["order_datetime"].dt.hour.astype(str))
+        view = [str(h) for h in range(24)]
+        xlabels = [f"{h}時" for h in range(24)]
+        return fd, view, xlabels, key, nav_label
+
+    # 日別
     ndays = calendar.monthrange(y_dt, mo_dt)[1]
-    fd = f.assign(_p=f["order_date"].dt.strftime("%Y-%m-%d"))
+    fd = fm.assign(_p=fm["order_date"].dt.strftime("%Y-%m-%d"))
     view = [f"{selm}-{d:02d}" for d in range(1, ndays + 1)]
     xlabels = [str(d) for d in range(1, ndays + 1)]
-    return fd, view, xlabels, key, f"{y_dt}年{mo_dt}月"
+    return fd, view, xlabels, key, nav_label
 
 
 # ==================== 期間レンジ選択（日付範囲） ====================
@@ -485,8 +502,9 @@ tab_yj, tab_hs, tab_cs = st.tabs(["予実推移", "販促結果", "顧客行動�
 
 # ---------------- 予実推移タブ ----------------
 with tab_yj:
-    digest_ui_yj = st.empty()
-    m_yj, gran_yj = axis_filters("yj")
+    digest_ui_yj = st.empty()            # ダイジェストは最上部に差し込む
+    gran_yj = granularity_control("yj")  # 表示・集計単位（ダイジェスト直下）
+    m_yj = axis_filters("yj")            # 分析軸パネルはその下
     f_yj = df[m_yj]
 
     periods_yj = build_periods(f_yj, gran_yj, "yj")
@@ -495,6 +513,9 @@ with tab_yj:
     else:
         fd_yj, view_yj, xlabels_yj, show_nav_yj, nav_label_yj = periods_yj
         global_last_yj = fd_yj["_p"].max()
+        is_cyc_yj = gran_yj in ("曜日別", "時間別")
+        sel_ym_yj = (fd_yj["order_date"].dt.strftime("%Y-%m").iloc[0]
+                     if is_cyc_yj else None)
 
         # --- 今月のダイジェスト（最新月固定） ---
         with digest_ui_yj.container(border=False):
@@ -539,10 +560,23 @@ with tab_yj:
         gpv = [float(ggp.get(p, 0.0)) for p in view_yj]
         promov = [float(gpromo.get(p, 0.0)) for p in view_yj]
         marginalv = [gpv[i] - promov[i] for i in range(len(view_yj))]
-        pred = [actual[i] * 0.15 if view_yj[i] == global_last_yj else 0.0
-                for i in range(len(view_yj))]
+        if is_cyc_yj:
+            pred = [0.0 for _ in view_yj]  # 分布表示（曜日別・時間別）は予測を出さない
+        else:
+            pred = [actual[i] * 0.15 if view_yj[i] == global_last_yj else 0.0
+                    for i in range(len(view_yj))]
 
         months_present_yj = sorted(f_yj["order_date"].dt.strftime("%Y-%m").unique())
+
+        # 曜日別・時間別は選択月の目標を各バケットへ按分する
+        if is_cyc_yj:
+            _y0, _m0 = int(sel_ym_yj[:4]), int(sel_ym_yj[5:7])
+            _nd0 = calendar.monthrange(_y0, _m0)[1]
+            _daily_t0 = get_target(_y0, _m0, target_base) / _nd0
+            _wd_cnt = pd.Series(
+                pd.date_range(f"{sel_ym_yj}-01", periods=_nd0, freq="D").weekday
+            ).value_counts()
+
         tgt = []
         for p in view_yj:
             if gran_yj == "年別":
@@ -557,7 +591,13 @@ with tab_yj:
                 t = sum(get_target(y_val, int(mm[5:7]), target_base) for mm in mons)
             elif gran_yj == "月別":
                 t = get_target(int(p[:4]), int(p[5:7]), target_base)
-            else:
+            elif gran_yj == "曜日別":
+                # 該当曜日1日あたり目標 × その月の該当曜日の日数
+                t = _daily_t0 * int(_wd_cnt.get(WEEKDAY_LABELS.index(p), 0))
+            elif gran_yj == "時間別":
+                # 月次目標を24時間で均等按分（フラットな基準線）
+                t = get_target(_y0, _m0, target_base) / 24
+            else:  # 日別
                 y_val, mo_val = int(p[:4]), int(p[5:7])
                 t = get_target(y_val, mo_val, target_base) / calendar.monthrange(y_val, mo_val)[1]
             tgt.append(t)
@@ -570,7 +610,23 @@ with tab_yj:
             traffic_p["_p"] = _dt.dt.year.astype(str) + "-" + _dt.dt.quarter.astype(str)
         elif gran_yj == "月別":
             traffic_p["_p"] = _dt.dt.strftime("%Y-%m")
-        else:
+        elif gran_yj == "曜日別":
+            traffic_p = traffic_p[_dt.dt.strftime("%Y-%m") == sel_ym_yj].copy()
+            traffic_p["_p"] = (pd.to_datetime(traffic_p["order_date"]).dt.weekday
+                               .map(dict(enumerate(WEEKDAY_LABELS))))
+        elif gran_yj == "時間別":
+            # 日次セッションしか無いため、実注文の時間帯構成比で各時間へ按分（推計）
+            tp_m = traffic_p[_dt.dt.strftime("%Y-%m") == sel_ym_yj]
+            _msess, _mord = tp_m["sessions"].sum(), tp_m["orders"].sum()
+            _share = fd_yj.groupby("_p").size()
+            _tot = _share.sum()
+            _share = _share / _tot if _tot else _share
+            traffic_p = pd.DataFrame([
+                {"_p": str(h),
+                 "sessions": _msess * float(_share.get(str(h), 0.0)),
+                 "orders": _mord * float(_share.get(str(h), 0.0))}
+                for h in range(24)])
+        else:  # 日別
             traffic_p["_p"] = traffic_p["order_date"]
         tsess = traffic_p.groupby("_p")["sessions"].sum()
         tord = traffic_p.groupby("_p")["orders"].sum()
@@ -784,12 +840,10 @@ with tab_hs:
     with st.container(border=True):
         render_title("サイト内インセンティブ")
 
-        cg = st.columns([1.2, 6])
-        cg[0].markdown("<div style='font-weight:700; padding-top:8px; color:#16191f;'>"
-                       "表示・集計単位：</div>", unsafe_allow_html=True)
-        gran_hs = cg[1].radio("集計単位", ["年別", "クォータ別", "月別", "日別"],
-                              horizontal=True,
-                              label_visibility="collapsed", key="gran_hs")
+        st.markdown("<div style='font-weight:700; color:#16191f; margin:2px 0 4px;'>"
+                    "表示・集計単位</div>", unsafe_allow_html=True)
+        gran_hs = st.radio("集計単位", GRAN_OPTIONS, horizontal=True,
+                           label_visibility="collapsed", key="gran_hs")
 
         periods_hs = build_periods(f_hs, gran_hs, "hs")
         fd_hs, view_hs, xlabels_hs, show_nav_hs, nav_label_hs = periods_hs
@@ -797,9 +851,18 @@ with tab_hs:
         lab_map = dict(zip(view_hs, xlabels_hs))
         months_present_hs = sorted(f_hs["order_date"].dt.strftime("%Y-%m").unique())
 
+        is_cyc_hs = gran_hs in ("曜日別", "時間別")
+        if is_cyc_hs:
+            sel_ym_hs = fd_hs["order_date"].dt.strftime("%Y-%m").iloc[0]
+            y_hs, m_hs = int(sel_ym_hs[:4]), int(sel_ym_hs[5:7])
+            nd_hs = calendar.monthrange(y_hs, m_hs)[1]
+            wdcnt_hs = pd.Series(
+                pd.date_range(f"{sel_ym_hs}-01", periods=nd_hs, freq="D").weekday
+            ).value_counts()
+
         def budget_for(p, name):
             """期間pに対応する予算額（年別＝当年の月数分、クォータ別＝該当月数分、
-            月別＝月次、日別＝日割り）"""
+            月別＝月次、曜日別＝日割×該当曜日数、日別＝日割り、時間別＝月次÷24）"""
             if gran_hs == "年別":
                 mons = [m for m in months_present_hs if m[:4] == p[:4]]
                 return BUDGET_M[name] * max(len(mons), 1)
@@ -812,7 +875,11 @@ with tab_hs:
                 return BUDGET_M[name] * max(len(mons), 1)
             if gran_hs == "月別":
                 return BUDGET_M[name]
-            y_, mo_ = int(p[:4]), int(p[5:7])
+            if gran_hs == "曜日別":
+                return BUDGET_M[name] / nd_hs * int(wdcnt_hs.get(WEEKDAY_LABELS.index(p), 0))
+            if gran_hs == "時間別":
+                return BUDGET_M[name] / 24
+            y_, mo_ = int(p[:4]), int(p[5:7])  # 日別
             return BUDGET_M[name] / calendar.monthrange(y_, mo_)[1]
 
         used_tbl = (f_view[f_view["promo_type"].isin(["ポイント", "クーポン"])]
