@@ -75,6 +75,23 @@ st.markdown(
         border-bottom:2px solid #e9ebed; padding:2px 0 6px; margin-bottom:8px;
     }
 
+    /* 分析軸パネル（折りたたみ可能）の枠・見出し */
+    [data-testid="stExpander"] {
+        border:1px solid #e9ebed !important;
+        border-radius:10px !important;
+        box-shadow:0 1px 3px rgba(0,0,0,0.05) !important;
+        background:#ffffff !important;
+        margin-bottom:8px;
+    }
+    [data-testid="stExpander"] summary {
+        border-left:6px solid #0073bb;
+        border-radius:2px 4px 0 0;
+        padding:8px 14px !important;
+    }
+    [data-testid="stExpander"] summary p {
+        font-size:16px !important; font-weight:700 !important; color:#16191f !important;
+    }
+
     [data-testid="stMetric"], .custom-metric {
         background-color: #ffffff !important;
         border: 1px solid #e9ebed !important;
@@ -320,10 +337,10 @@ traffic_all = compute_daily_traffic()
 
 # ==================== 分析軸（共通フィルタ） ====================
 def axis_filters(suffix):
-    """企業／商品／ユーザー情報／流入媒体 に分類した分析軸UI。未選択＝すべて。"""
+    """企業／商品／ユーザー情報／流入媒体 に分類した分析軸UI。未選択＝すべて。
+    枠は st.expander で折りたたみ可能。"""
     mask = FULL.copy()
-    with st.container(border=True):
-        render_title("分析軸・集計単位")
+    with st.expander("分析軸・集計単位", expanded=True):
         form = st.form(f"form_{suffix}", border=False)
     with form:
         # ---- 企業 ----
