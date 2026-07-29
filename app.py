@@ -11,6 +11,7 @@ st.set_page_config(page_title="ECダッシュボード", layout="wide",
 BLUE, LIGHT, GREEN, AMBER, PURPLE = "#0073bb", "#87c1eb", "#2ca02c", "#d67229", "#8c56cb"
 GRAY = "#c8cdd4"
 TARGETC, GAPPOS, GAPNEG = "#d62728", "#1d8102", "#d13212"
+MALE, FEMALE = "#2f6fd0", "#e0463e"          # 性別（男性=青／女性=赤）
 
 st.markdown(
     """
@@ -75,7 +76,7 @@ st.markdown(
         border-bottom:2px solid #e9ebed; padding:2px 0 6px; margin-bottom:8px;
     }
 
-    /* 分析軸パネル（折りたたみ可能）の枠・見出し */
+    /* 分析軸パネル（アコーディオン）の枠・見出し */
     [data-testid="stExpander"] {
         border:1px solid #e9ebed !important;
         border-radius:10px !important;
@@ -125,6 +126,14 @@ st.markdown(
         border-radius:14px; padding:2px 12px; font-size:12.5px; font-weight:700; }
     .badge-ng { background:#fdeceb; color:#d13212; border:1px solid #f4bdb7;
         border-radius:14px; padding:2px 12px; font-size:12.5px; font-weight:700; }
+
+    /* 商品カード・口コミPICK UP */
+    .prod-card { border:1px solid #e9ebed; border-radius:10px; padding:16px 18px;
+        box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+    .pick-box { border:1px solid #e9ebed; border-radius:8px; padding:10px 14px;
+        margin-bottom:8px; font-size:13px; color:#16191f; line-height:1.5; }
+    .pick-pos { background:#fdf1ee; border-color:#f4d3c8; }
+    .pick-neg { background:#eef4fb; border-color:#cfe0f2; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -134,12 +143,18 @@ REQUIRED = ["order_date", "order_datetime", "member_rank", "cat_l", "cat_m", "ca
             "price", "sales_amount", "cost_amount", "channel", "promo_type",
             "discount_amount", "feature_tag", "order_id"]
 
-# ---- デモ属性のマスタ（CSVに無い分析軸を order_id から決定論的に導出）----
+# ---- デモ属性のマスタ（CSVに無い分析軸を order_id / cat_s から決定論的に導出）----
 REPS = ["田中", "佐藤", "鈴木", "高橋", "伊藤"]
 STORE_CH = ["本店", "d店", "d払い店", "うま博", "バリューマルシェ",
             "生活市場", "Y店", "R店", "A店"]
 SUPPLIERS = ["アサヒ飲料株式会社", "株式会社伊藤園", "株式会社ライフェスト"]
+# 「企業分析レポート」用の販売企業マスタ（cat_s を商品として各社に割当）
+COMPANIES = ["株式会社アサヒ通商", "株式会社伊藤園", "株式会社ライフェスト", "森友通商株式会社",
+             "みどり物産株式会社", "富士フーズ株式会社", "大和ロジコム株式会社",
+             "サンライズ商事株式会社", "新東京物産株式会社", "関西マルシェ株式会社",
+             "北国流通株式会社", "ひまわり商会株式会社"]
 AGE_ORDER = ["10代", "20代", "30代", "40代", "50代", "60代", "70代", "80代", "90代"]
+AGE6 = ["10代以下", "20代", "30代", "40代", "50代", "60代以上"]   # プロファイル用の集約年代
 TRADE_ORDER = ["在庫型", "受注型", "直送型"]
 CHOPPLE_ORDER = ["通常", "仕入れ"]
 GENDER_ORDER = ["女性", "男性"]
@@ -151,6 +166,18 @@ GRAN_OPTIONS = ["年別", "クォータ別", "月別", "曜日別", "日別", "�
 
 # 販促の月次計画予算（デモ）：ポイント45万/月、クーポン26万/月
 BUDGET_M = {"ポイント": 450_000, "クーポン": 260_000}
+
+# 食品系 cat_l（口コミの文面フレーバー切替に使用）
+FOOD_CATL = {"お菓子", "食品・調味料", "飲料", "お酒", "アイス・スイーツ",
+             "生鮮食品", "加工食品", "健康・ダイエット・サプリメント"}
+
+
+def _hash_str(s):
+    """文字列から決定論的な非負整数を作る（企業割当・口コミseed用）。"""
+    v = 0
+    for ch in str(s):
+        v = (v * 131 + ord(ch)) % 2147483647
+    return v
 
 
 @st.cache_data
@@ -199,6 +226,12 @@ def read_data():
          df["promo_type"].eq("クーポン") & df["施策種類"].isin(item_cp),
          df["promo_type"].eq("クーポン")],
         ["ポイント施策", "商品別クーポン施策", "総額クーポン施策"], default="-")
+
+    # --- 企業・商品（デモ）：cat_s を「商品」、cat_s から決定論的に「企業」を割当 ---
+    cats = sorted(df["cat_s"].unique())
+    cmap = {s: COMPANIES[_hash_str(s) % len(COMPANIES)] for s in cats}
+    df["商品"] = df["cat_s"]
+    df["企業"] = df["cat_s"].map(cmap)
     return df, []
 
 
@@ -336,75 +369,74 @@ traffic_all = compute_daily_traffic()
 
 
 # ==================== 分析軸（共通フィルタ） ====================
-def axis_filters(suffix):
+def axis_filters(suffix, expanded=True):
     """企業／商品／ユーザー情報／流入媒体 に分類した分析軸UI。未選択＝すべて。
-    枠は st.expander で折りたたみ可能。"""
+    折りたたみ可能なアコーディオン（st.expander）。集計単位は別UI（表示・集計単位）で扱う。"""
     mask = FULL.copy()
-    with st.expander("分析軸・集計単位", expanded=True):
-        form = st.form(f"form_{suffix}", border=False)
-    with form:
-        # ---- 企業 ----
-        st.markdown("<div class='axis-group'>企業</div>", unsafe_allow_html=True)
-        c = st.columns(2)
-        v_trade = c[0].multiselect("取引区分", TRADE_ORDER, key=f"trade_{suffix}")
-        v_rep = c[1].multiselect("営業担当", REPS, key=f"rep_{suffix}")
-        if v_trade:
-            mask &= df["取引区分"].isin(v_trade)
-        if v_rep:
-            mask &= df["営業担当"].isin(v_rep)
+    with st.expander("分析軸", expanded=expanded):
+        with st.form(f"form_{suffix}", border=False):
+            # ---- 企業 ----
+            st.markdown("<div class='axis-group'>企業</div>", unsafe_allow_html=True)
+            c = st.columns(2)
+            v_trade = c[0].multiselect("取引区分", TRADE_ORDER, key=f"trade_{suffix}")
+            v_rep = c[1].multiselect("営業担当", REPS, key=f"rep_{suffix}")
+            if v_trade:
+                mask &= df["取引区分"].isin(v_trade)
+            if v_rep:
+                mask &= df["営業担当"].isin(v_rep)
 
-        # ---- 商品 ----
-        st.markdown("<div class='axis-group'>商品</div>", unsafe_allow_html=True)
-        c = st.columns(2)
-        v_chop = c[0].multiselect("ちょっプル", CHOPPLE_ORDER, key=f"chop_{suffix}")
-        v_store = c[1].multiselect("チャネル別", STORE_CH, key=f"store_{suffix}")
-        if v_chop:
-            mask &= df["ちょっプル"].isin(v_chop)
-        if v_store:
-            mask &= df["チャネル別"].isin(v_store)
+            # ---- 商品 ----
+            st.markdown("<div class='axis-group'>商品</div>", unsafe_allow_html=True)
+            c = st.columns(2)
+            v_chop = c[0].multiselect("ちょっプル", CHOPPLE_ORDER, key=f"chop_{suffix}")
+            v_store = c[1].multiselect("チャネル別", STORE_CH, key=f"store_{suffix}")
+            if v_chop:
+                mask &= df["ちょっプル"].isin(v_chop)
+            if v_store:
+                mask &= df["チャネル別"].isin(v_store)
 
-        c = st.columns(4)
-        all_l = sorted(df["cat_l"].unique())
-        v_l = c[0].multiselect("カテゴリ（大）", all_l, key=f"cat_l_{suffix}")
-        lmask = df["cat_l"].isin(v_l) if v_l else FULL
-        mid = sorted(df.loc[lmask, "cat_m"].unique())
-        v_m = c[1].multiselect("カテゴリ（中）", mid, key=f"cat_m_{suffix}")
-        mmask = df["cat_m"].isin(v_m) if v_m else FULL
-        sopts = sorted(df.loc[lmask & mmask, "cat_s"].unique())
-        v_s = c[2].multiselect("カテゴリ（小）", sopts, key=f"cat_s_{suffix}")
-        v_sup = c[3].multiselect("仕入先", SUPPLIERS, key=f"sup_{suffix}")
-        mask &= lmask & mmask
-        if v_s:
-            mask &= df["cat_s"].isin(v_s)
-        if v_sup:
-            mask &= df["仕入先"].isin(v_sup)
+            c = st.columns(4)
+            all_l = sorted(df["cat_l"].unique())
+            v_l = c[0].multiselect("カテゴリ（大）", all_l, key=f"cat_l_{suffix}")
+            lmask = df["cat_l"].isin(v_l) if v_l else FULL
+            mid = sorted(df.loc[lmask, "cat_m"].unique())
+            v_m = c[1].multiselect("カテゴリ（中）", mid, key=f"cat_m_{suffix}")
+            mmask = df["cat_m"].isin(v_m) if v_m else FULL
+            sopts = sorted(df.loc[lmask & mmask, "cat_s"].unique())
+            v_s = c[2].multiselect("カテゴリ（小）", sopts, key=f"cat_s_{suffix}")
+            v_sup = c[3].multiselect("仕入先", SUPPLIERS, key=f"sup_{suffix}")
+            mask &= lmask & mmask
+            if v_s:
+                mask &= df["cat_s"].isin(v_s)
+            if v_sup:
+                mask &= df["仕入先"].isin(v_sup)
 
-        # ---- ユーザー情報 ----
-        st.markdown("<div class='axis-group'>ユーザー情報</div>", unsafe_allow_html=True)
-        c = st.columns(3)
-        v_rank = c[0].multiselect("会員ランク", RANK_ORDER, key=f"rank_{suffix}")
-        v_age = c[1].multiselect("年代", AGE_ORDER, key=f"age_{suffix}")
-        v_gender = c[2].multiselect("性別", GENDER_ORDER, key=f"gender_{suffix}")
-        if v_rank:
-            mask &= df["member_rank"].isin(v_rank)
-        if v_age:
-            mask &= df["年代"].isin(v_age)
-        if v_gender:
-            mask &= df["性別"].isin(v_gender)
+            # ---- ユーザー情報 ----
+            st.markdown("<div class='axis-group'>ユーザー情報</div>", unsafe_allow_html=True)
+            c = st.columns(3)
+            v_rank = c[0].multiselect("会員ランク", RANK_ORDER, key=f"rank_{suffix}")
+            v_age = c[1].multiselect("年代", AGE_ORDER, key=f"age_{suffix}")
+            v_gender = c[2].multiselect("性別", GENDER_ORDER, key=f"gender_{suffix}")
+            if v_rank:
+                mask &= df["member_rank"].isin(v_rank)
+            if v_age:
+                mask &= df["年代"].isin(v_age)
+            if v_gender:
+                mask &= df["性別"].isin(v_gender)
 
-        # ---- 流入媒体 ----
-        st.markdown("<div class='axis-group'>流入媒体</div>", unsafe_allow_html=True)
-        v_ch = st.multiselect("流入媒体", sorted(df["channel"].unique()), key=f"ch_{suffix}")
-        if v_ch:
-            mask &= df["channel"].isin(v_ch)
+            # ---- 流入媒体 ----
+            st.markdown("<div class='axis-group'>流入媒体</div>", unsafe_allow_html=True)
+            v_ch = st.multiselect("流入媒体", sorted(df["channel"].unique()), key=f"ch_{suffix}")
+            if v_ch:
+                mask &= df["channel"].isin(v_ch)
 
-        st.form_submit_button("この条件で表示", type="primary")
+            st.form_submit_button("この条件で表示", type="primary")
     return mask
 
 
 # ==================== 表示・集計単位（フォーム外＝即時反映） ====================
 def granularity_control(suffix):
-    """表示・集計単位を1行フル幅で表示（横スクロールなし）。ダイジェスト直下に配置する想定。"""
+    """表示・集計単位を1行フル幅で表示（横スクロールなし）。"""
     with st.container(border=True):
         render_title("表示・集計単位")
         return st.radio("集計単位", GRAN_OPTIONS, horizontal=True,
@@ -514,8 +546,186 @@ def month_range_selector(key, label="分析期間"):
     return df[(d >= s_ts) & (d <= e_ts)], lbl, s.strftime("%Y-%m"), e.strftime("%Y-%m")
 
 
+# ==================== 企業分析レポート用ヘルパー ====================
+_AGE6_MAP = {"10代": "10代以下", "60代": "60代以上", "70代": "60代以上",
+             "80代": "60代以上", "90代": "60代以上"}
+
+
+def to_age6(s):
+    """年代（10代〜90代）をプロファイル用の6区分に集約。"""
+    return s.map(lambda a: _AGE6_MAP.get(a, a))
+
+
+def _skew_gender(base_female, seed, amp):
+    """性別（女性%）に決定論的なズレを与える（デモ用の見栄え差分）。"""
+    rng = np.random.default_rng(seed)
+    f = base_female + (rng.random() * 2 - 1) * amp
+    f = float(min(max(f, 22.0), 90.0))
+    return {"女性": round(f, 1), "男性": round(100 - f, 1)}
+
+
+def _skew_age(base_series, seed, amp):
+    """年代構成比（AGE6・%）に決定論的な重み付けでズレを与える。"""
+    rng = np.random.default_rng(seed + 7)
+    w = 1 + (rng.random(len(base_series)) * 2 - 1) * amp / 100.0
+    v = base_series.to_numpy() * np.clip(w, 0.2, 3.0)
+    tot = v.sum()
+    v = v / tot * 100 if tot else v
+    return pd.Series(np.round(v, 1), index=base_series.index)
+
+
+def group_profile(d, skew_seed=None, amp_g=0.0, amp_a=0.0):
+    """顧客単位の性別・年代（AGE6）プロファイルを返す。
+    skew_seed=None のときは実データそのまま（全会員の基準）。"""
+    if d.empty:
+        z = pd.Series([0.0] * len(AGE6), index=AGE6)
+        return 0, {"女性": 0.0, "男性": 0.0}, z
+    cu = d.groupby("顧客ID").agg(性別=("性別", "first"), 年代=("年代", "first"))
+    cu["A6"] = to_age6(cu["年代"])
+    tot = len(cu)
+    gser = cu["性別"].value_counts(normalize=True).mul(100)
+    base_female = float(gser.get("女性", 0.0))
+    aser = (cu["A6"].value_counts(normalize=True).reindex(AGE6).fillna(0).mul(100))
+    if skew_seed is None:
+        gender = {"女性": round(base_female, 1), "男性": round(100 - base_female, 1)}
+        age = aser.round(1)
+    else:
+        gender = _skew_gender(base_female, skew_seed, amp_g)
+        age = _skew_age(aser, skew_seed, amp_a)
+    return tot, gender, age
+
+
+def company_products(comp, data):
+    """企業に属する商品（cat_s）を取扱件数の多い順に返す。"""
+    sub = data[data["企業"] == comp]
+    if sub.empty:
+        return []
+    return (sub.groupby("商品")["order_id"].nunique()
+            .sort_values(ascending=False).index.tolist())
+
+
+# --- 口コミ生成（デモ：商品名をseedに決定論的に生成） ---
+_POS = ["コスパが良くて満足しています。また購入したいです。",
+        "期待どおりの品質でリピートしています。",
+        "手軽に使えてとても便利でした。おすすめです。",
+        "価格の割にしっかりしていて良かったです。",
+        "届くのも早く梱包も丁寧で好印象でした。",
+        "家族にも好評で、まとめ買いしました。",
+        "使い勝手が良く、日常的に重宝しています。",
+        "想像以上に良い商品でした。買ってよかったです。",
+        "リピート決定です。安定した品質で安心して使えます。",
+        "この価格でこの品質なら文句なしです。"]
+_POS_FOOD = ["甘さ控えめで手軽に楽しめ、とても美味しいです。",
+             "味がしっかりしていて、家族みんな気に入っています。",
+             "安価で美味しく、何度もリピートしています。",
+             "手ごろな価格で大変満足しています。また買いたいです。",
+             "風味が良く、food としてクオリティが高いと感じました。"]
+_NEU = ["可もなく不可もなく、普通でした。",
+        "値段相応かなという印象です。",
+        "悪くはないですが、期待していたほどではありませんでした。",
+        "特に問題はありませんが、リピートは検討中です。",
+        "無難な商品だと思います。"]
+_NEG = ["思っていたのと違い、少し残念でした。",
+        "価格の割に品質が今ひとつでした。",
+        "配送に時間がかかった点が気になりました。",
+        "リピートはしないかなという印象です。",
+        "梱包に改善の余地があると感じました。"]
+
+
+def _sentiment_split(name, base_pos, base_neu):
+    """商品名／カテゴリ名から決定論的に感情比率を作る。"""
+    s = _hash_str(name)
+    pos = base_pos + (s % 14) / 100.0
+    neu = base_neu + (s % 8) / 100.0
+    neg = max(1 - pos - neu, 0.01)
+    t = pos + neu + neg
+    return {"ポジティブ": pos / t, "普通": neu / t, "ネガティブ": neg / t}
+
+
+def _sample_scores(rng, split, n):
+    sent = rng.choice(["ポジティブ", "普通", "ネガティブ"], size=n,
+                      p=[split["ポジティブ"], split["普通"], split["ネガティブ"]])
+    sc = np.empty(n, dtype=int)
+    for i, s in enumerate(sent):
+        if s == "ポジティブ":
+            sc[i] = int(np.clip(rng.normal(88, 7), 61, 100))
+        elif s == "普通":
+            sc[i] = int(np.clip(rng.normal(50, 6), 40, 60))
+        else:
+            sc[i] = int(np.clip(rng.normal(24, 9), 0, 39))
+    return sent, sc
+
+
+def _score_hist(scores):
+    edges = list(range(0, 105, 5))
+    labels = edges[:-1]
+    cats = pd.cut(scores, bins=edges, right=False, labels=labels)
+    h = cats.value_counts().reindex(labels).fillna(0)
+    pct = (h / h.sum() * 100) if h.sum() else h
+    return pd.DataFrame({"score": labels, "比率": pct.to_numpy()})
+
+
+@st.cache_data
+def gen_reviews(product, cat_l, cat_m, n_orders):
+    """商品の口コミ（デモ）と、同カテゴリのスコア分布ベンチマークを生成。"""
+    rng = np.random.default_rng(_hash_str(product))
+    n = int(min(max(round(n_orders * 0.35), 25), 240))
+    p_split = _sentiment_split(product, 0.80, 0.05)
+    c_split = _sentiment_split(cat_m, 0.77, 0.07)
+
+    sent, scores = _sample_scores(rng, p_split, n)
+    is_food = cat_l in FOOD_CATL
+    age_p = np.array([0.03, 0.06, 0.10, 0.16, 0.24, 0.22, 0.13, 0.05, 0.01])
+    age_p = age_p / age_p.sum()
+    ages = rng.choice([int(a[:-1] + "0") if False else a for a in AGE_ORDER],
+                      size=n, p=age_p)
+    ages_num = rng.integers(0, 9, size=n)  # ばらけ用
+    genders = rng.choice(["女性", "男性"], size=n, p=[0.62, 0.38])
+
+    comments = []
+    for s in sent:
+        if s == "ポジティブ":
+            pool = _POS_FOOD if (is_food and rng.random() < 0.5) else _POS
+        elif s == "普通":
+            pool = _NEU
+        else:
+            pool = _NEG
+        comments.append(str(rng.choice(pool)))
+
+    # 年齢は年代帯の中でばらす（51〜59歳など）
+    def age_to_int(a, jitter):
+        base = int(a[:-1]) * 10 if a[:-1].isdigit() else 20
+        return base + int(jitter % 10)
+    age_int = [age_to_int(a, j) for a, j in zip(ages, ages_num)]
+
+    end = pd.Timestamp(DATE_MAX)
+    offs = np.sort(rng.integers(0, 130, size=n))[::-1]
+    dates = [(end - pd.Timedelta(days=int(o))).strftime("%Y/%m/%d") for o in offs]
+
+    rv = pd.DataFrame({"年齢": age_int, "性別": genders, "コメント": comments,
+                       "感情": sent, "コメント日": dates, "score": scores})
+
+    # スコア分布（貴社商品 vs 同カテ商品）
+    _, cat_scores = _sample_scores(np.random.default_rng(_hash_str(cat_m) + 1),
+                                   c_split, max(n * 3, 120))
+    dist_p = _score_hist(scores).rename(columns={"比率": "貴社商品"})
+    dist_c = _score_hist(cat_scores).rename(columns={"比率": "同カテ商品"})
+    score_dist = dist_p.merge(dist_c, on="score")
+
+    def counts(sp):
+        return {k: round(v * 100, 1) for k, v in sp.items()}
+
+    pos_pick = rv[rv["感情"] == "ポジティブ"]["コメント"].drop_duplicates().head(3).tolist()
+    neg_pick = rv[rv["感情"] == "ネガティブ"]["コメント"].drop_duplicates().head(3).tolist()
+
+    return {"reviews": rv, "n": n,
+            "sent_prod": counts(p_split), "sent_cat": counts(c_split),
+            "score_dist": score_dist, "pos_pick": pos_pick, "neg_pick": neg_pick}
+
+
 # ==================== タブ構成 ====================
-tab_yj, tab_hs, tab_cs = st.tabs(["予実推移", "販促結果", "顧客行動分析"])
+tab_yj, tab_hs, tab_cs, tab_ci = st.tabs(
+    ["予実推移", "販促結果", "顧客行動分析", "企業分析レポート"])
 
 # ---------------- 予実推移タブ ----------------
 with tab_yj:
@@ -1409,3 +1619,323 @@ with tab_cs:
                               .resolve_scale(y="independent", color="independent")
                               .properties(height=300))
             st.altair_chart(mchart, use_container_width=True)
+
+
+# ---------------- 企業分析レポートタブ ----------------
+with tab_ci:
+    # 感情・年代のカラー
+    SENT_DOM = ["ポジティブ", "普通", "ネガティブ"]
+    SENT_RNG = ["#e0651f", "#2ca02c", "#2f6fd0"]
+    AGE6_RNG = ["#2f6fd0", "#5a9bd8", "#9ec6e6", "#f0c07a", "#e08b3c", "#c8541f"]
+
+    # ===== 企業・商品の選択（ダイジェスト位置：企業サジェスト）=====
+    with st.container(border=True):
+        render_title("企業・商品の選択")
+        sel = st.columns([1.4, 1.4, 2.2])
+        companies = sorted(df["企業"].unique())
+        sel_comp = sel[0].selectbox("企業（入力して絞り込み）", companies, key="comp_ci")
+        prods = company_products(sel_comp, df)
+        sel_prod = sel[1].selectbox("商品（入力して絞り込み）", prods, key="prod_ci")
+        prow0 = df[df["商品"] == sel_prod].iloc[0]
+        p_catl, p_catm = prow0["cat_l"], prow0["cat_m"]
+        sel[2].markdown(
+            f"<div style='padding-top:30px; color:#5f6b7a; font-size:13px;'>"
+            f"カテゴリ：<b style='color:#16191f;'>{p_catl}</b> ＞ "
+            f"<b style='color:#16191f;'>{p_catm}</b> ＞ "
+            f"<b style='color:#0073bb;'>{sel_prod}</b></div>",
+            unsafe_allow_html=True)
+
+    gran_ci = granularity_control("ci")
+    m_ci = axis_filters("ci", expanded=False)
+    f_ci = df[m_ci]
+
+    prod_rows = f_ci[f_ci["商品"] == sel_prod]
+    cate_rows = f_ci[f_ci["cat_m"] == p_catm]
+    all_rows = f_ci
+
+    if prod_rows.empty:
+        st.warning("選択した商品に該当するデータが、分析軸の条件下にありません。"
+                   "分析軸を緩めるか、商品を変更してください。")
+    else:
+        # ===================== 応募実績サマリー =====================
+        with st.container(border=True):
+            n_buyers = prod_rows["顧客ID"].nunique()
+            n_orders = prod_rows["order_id"].nunique()
+            sales_sum = prod_rows["sales_amount"].sum()
+            avg_price = prod_rows["price"].mean()
+            avg_qty = prod_rows["quantity"].mean()
+            pmin = prod_rows["order_date"].min().strftime("%Y/%m/%d")
+            pmax = prod_rows["order_date"].max().strftime("%Y/%m/%d")
+
+            render_title(f"応募実績サマリー｜{sel_comp}｜{sel_prod}")
+
+            hk = st.columns(4)
+            hk[0].metric("購入件数", f"{n_orders:,} 件")
+            hk[1].metric("購入者数", f"{n_buyers:,} 人")
+            hk[2].metric("販売金額", man(sales_sum))
+            hk[3].metric("平均単価", f"{avg_price:,.0f} 円")
+            st.markdown(
+                f"<div style='color:#5f6b7a; font-size:12.5px; margin:2px 0 12px;'>"
+                f"対象期間：{pmin} 〜 {pmax}</div>", unsafe_allow_html=True)
+
+            has_promo = (prod_rows["promo_type"] != "なし").any()
+            promo_badge = ("ポイント／クーポン施策あり" if has_promo else "施策なし")
+            top = st.columns([1.1, 1.4])
+            with top[0]:
+                st.markdown(
+                    f"""<div class="prod-card">
+                    <div style="color:#5f6b7a; font-size:12px;">{sel_comp}</div>
+                    <div style="font-size:17px; font-weight:700; color:#16191f;
+                         margin:4px 0 10px;">{sel_prod}</div>
+                    <div style="color:#5f6b7a; font-size:12.5px; margin-bottom:12px;">
+                         {p_catl} ＞ {p_catm}</div>
+                    <div style="display:flex; gap:26px; flex-wrap:wrap;">
+                      <div><div style="color:#5f6b7a; font-size:12px;">平均単価</div>
+                        <div style="font-size:1.5rem; font-weight:700; color:#d13212;">
+                        {avg_price:,.0f}円</div></div>
+                      <div><div style="color:#5f6b7a; font-size:12px;">平均購入点数</div>
+                        <div style="font-size:1.5rem; font-weight:700; color:#16191f;">
+                        {avg_qty:.1f}点</div></div>
+                    </div>
+                    <div style="margin-top:14px;"><span class="badge-ok">{promo_badge}</span>
+                    </div></div>""",
+                    unsafe_allow_html=True)
+
+            with top[1]:
+                render_title("購入件数の推移")
+                pt = build_periods(prod_rows, gran_ci, "ci_trend")
+                if pt is None:
+                    st.info("この集計単位では表示できるデータがありません。")
+                else:
+                    fd_t, view_t, xlab_t, nav_t, lab_t = pt
+                    cnt = fd_t.groupby("_p")["order_id"].nunique()
+                    trend_df = pd.DataFrame({"period": xlab_t,
+                                             "購入件数": [int(cnt.get(p, 0)) for p in view_t]})
+                    tb = alt.Chart(trend_df).encode(
+                        x=alt.X("period:N", sort=None, title=None, axis=period_axis()),
+                        y=alt.Y("購入件数:Q", title="購入件数（件）",
+                                axis=alt.Axis(format=",.0f")))
+                    tchart = alt.layer(
+                        tb.mark_bar(color=BLUE).encode(
+                            tooltip=[alt.Tooltip("period:N", title="期間"),
+                                     alt.Tooltip("購入件数:Q", format=",.0f")]),
+                        tb.mark_text(dy=-8, color="#16191f", fontWeight="bold", fontSize=10)
+                        .encode(text=alt.Text("購入件数:Q", format=",.0f")),
+                    ).properties(height=250)
+                    chart_with_nav(qs_style(tchart), nav_t, "ci_trend", spacer_px=95)
+
+            # --- プロファイル（性別・年代）: 3グループ比較 ---
+            grp_order = ["当社全会員", "当商品購入者", "当社同カテ商品"]
+            grp_src = {
+                "当社全会員": (all_rows, None, 0, 0),
+                "当商品購入者": (prod_rows, _hash_str(sel_prod), 18, 42),
+                "当社同カテ商品": (cate_rows, _hash_str(p_catm), 8, 16),
+            }
+            prof = {}
+            for name in grp_order:
+                d, seed, ag, aa = grp_src[name]
+                prof[name] = group_profile(d, skew_seed=seed, amp_g=ag, amp_a=aa)
+
+            pcols = st.columns(2)
+            with pcols[0]:
+                render_title("応募者プロファイル｜性別")
+                g_rows = []
+                for name in grp_order:
+                    _, gd, _ = prof[name]
+                    for g in ["男性", "女性"]:
+                        g_rows.append({"グループ": name, "性別": g, "比率": gd[g]})
+                gdf = pd.DataFrame(g_rows)
+                gbase = alt.Chart(gdf).encode(
+                    y=alt.Y("グループ:N", sort=grp_order, title=None),
+                    x=alt.X("比率:Q", stack="zero", title="構成比（%）",
+                            scale=alt.Scale(domain=[0, 100]),
+                            axis=alt.Axis(format=",.0f")),
+                    order=alt.Order("性別:N", sort="descending"))
+                gchart = alt.layer(
+                    gbase.mark_bar().encode(
+                        color=alt.Color("性別:N", title=None,
+                                        scale=alt.Scale(domain=["男性", "女性"],
+                                                        range=[MALE, FEMALE])),
+                        tooltip=[alt.Tooltip("グループ:N"), alt.Tooltip("性別:N"),
+                                 alt.Tooltip("比率:Q", format=".1f", title="構成比(%)")]),
+                    gbase.mark_text(color="#ffffff", fontWeight="bold", fontSize=11)
+                    .encode(text=alt.Text("比率:Q", format=".1f")),
+                ).properties(height=200)
+                st.altair_chart(qs_style(gchart), use_container_width=True)
+
+            with pcols[1]:
+                render_title("応募者プロファイル｜年代")
+                a_rows = []
+                for name in grp_order:
+                    _, _, aser = prof[name]
+                    for a in AGE6:
+                        a_rows.append({"グループ": name, "年代": a, "比率": float(aser[a])})
+                adf = pd.DataFrame(a_rows)
+                achart = alt.Chart(adf).mark_bar().encode(
+                    y=alt.Y("グループ:N", sort=grp_order, title=None),
+                    x=alt.X("比率:Q", stack="zero", title="構成比（%）",
+                            scale=alt.Scale(domain=[0, 100]),
+                            axis=alt.Axis(format=",.0f")),
+                    color=alt.Color("年代:N", title=None,
+                                    scale=alt.Scale(domain=AGE6, range=AGE6_RNG),
+                                    sort=AGE6),
+                    order=alt.Order("年代:N", sort="ascending"),
+                    tooltip=[alt.Tooltip("グループ:N"), alt.Tooltip("年代:N"),
+                             alt.Tooltip("比率:Q", format=".1f", title="構成比(%)")],
+                ).properties(height=200)
+                st.altair_chart(qs_style(achart), use_container_width=True)
+
+        # ===================== 応募詳細（性別・年代・リピート率）=====================
+        with st.container(border=True):
+            render_title("応募詳細（性別・年代・リピート率）")
+
+            def pyramid(name):
+                _, gd, aser = prof[name]
+                rows = []
+                for a in AGE6:
+                    rows.append({"年代": a, "性別": "男性",
+                                 "値": -(float(aser[a]) * gd["男性"] / 100)})
+                    rows.append({"年代": a, "性別": "女性",
+                                 "値": (float(aser[a]) * gd["女性"] / 100)})
+                pdf = pd.DataFrame(rows)
+                mx = max(pdf["値"].abs().max(), 1.0) * 1.15
+                ch = alt.Chart(pdf).mark_bar().encode(
+                    y=alt.Y("年代:N", sort=list(reversed(AGE6)), title=None),
+                    x=alt.X("値:Q", title="構成比（%）",
+                            scale=alt.Scale(domain=[-mx, mx]),
+                            axis=alt.Axis(labelExpr="abs(datum.value) + '%'")),
+                    color=alt.Color("性別:N", title=None,
+                                    scale=alt.Scale(domain=["男性", "女性"],
+                                                    range=[MALE, FEMALE])),
+                    tooltip=[alt.Tooltip("年代:N"), alt.Tooltip("性別:N"),
+                             alt.Tooltip("値:Q", format=".1f", title="構成比(%)")],
+                ).properties(height=240)
+                return qs_style(ch)
+
+            def profile_table(name):
+                _, gd, aser = prof[name]
+                data = {}
+                for g in ["女性", "男性"]:
+                    data[g] = [round(float(aser[a]) * gd[g] / 100, 1) for a in AGE6]
+                tdf = pd.DataFrame(data, index=AGE6).T
+                tdf["計"] = tdf.sum(axis=1).round(1)
+                tdf.loc["計"] = tdf.sum(axis=0).round(1)
+                return tdf
+
+            titles = {"当社全会員": "当社全会員の属性",
+                      "当商品購入者": "当商品購入者の属性",
+                      "当社同カテ商品": "当社同カテ商品の属性"}
+            dcols = st.columns(3)
+            for i, name in enumerate(grp_order):
+                with dcols[i]:
+                    sub_head(titles[name])
+                    st.altair_chart(pyramid(name), use_container_width=True)
+                    st.dataframe(profile_table(name), use_container_width=True)
+
+            # リピート率（当商品）
+            sub_head("リピート率（当商品の購入回数）")
+            rp = prod_rows.groupby("顧客ID")["order_id"].nunique()
+            rp_lbl = ["1回", "2回", "3回", "4回", "5回", "6回以上"]
+            rp_cnt = (pd.cut(rp, bins=[0, 1, 2, 3, 4, 5, np.inf], labels=rp_lbl)
+                      .value_counts().reindex(rp_lbl).fillna(0).astype(int))
+            tot_rp = int(rp_cnt.sum())
+            rp_df = pd.DataFrame({
+                "購入回数": rp_lbl,
+                "件数": rp_cnt.to_numpy(),
+                "割合(%)": (rp_cnt / tot_rp * 100).round(1).to_numpy() if tot_rp else 0,
+            })
+            rc = st.columns([1.1, 1.6])
+            with rc[0]:
+                total_row = pd.DataFrame({"購入回数": ["総計"], "件数": [tot_rp],
+                                          "割合(%)": [100.0 if tot_rp else 0.0]})
+                st.dataframe(pd.concat([rp_df, total_row], ignore_index=True),
+                             use_container_width=True, hide_index=True)
+            with rc[1]:
+                rbar = alt.Chart(rp_df).encode(
+                    x=alt.X("購入回数:N", sort=rp_lbl, title=None,
+                            axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("件数:Q", title="人数（人）", axis=alt.Axis(format=",.0f")))
+                rchart = alt.layer(
+                    rbar.mark_bar(color=AMBER).encode(
+                        tooltip=[alt.Tooltip("購入回数:N"),
+                                 alt.Tooltip("件数:Q", format=",.0f"),
+                                 alt.Tooltip("割合(%):Q", format=".1f")]),
+                    rbar.mark_text(dy=-8, color="#16191f", fontWeight="bold", fontSize=10)
+                    .encode(text=alt.Text("件数:Q", format=",.0f")),
+                ).properties(height=220)
+                st.altair_chart(qs_style(rchart), use_container_width=True)
+
+        # ===================== AI活用 口コミサマリー =====================
+        rev = gen_reviews(sel_prod, p_catl, p_catm, n_orders)
+
+        with st.container(border=True):
+            render_title("AI活用 口コミサマリー（貴社商品 vs 当社同カテゴリ商品）")
+
+            oc = st.columns([1, 1.5])
+            with oc[0]:
+                st.metric("口コミ投稿数（貴社商品）", f"{rev['n']:,} 件")
+                sub_head("口コミ 感情の割合（外側：貴社商品／内側：同カテ）")
+                ring_rows = []
+                for s in SENT_DOM:
+                    ring_rows.append({"リング": "貴社商品", "感情": s,
+                                      "値": rev["sent_prod"][s]})
+                    ring_rows.append({"リング": "同カテ商品", "感情": s,
+                                      "値": rev["sent_cat"][s]})
+                ring_df = pd.DataFrame(ring_rows)
+                color_enc = alt.Color("感情:N", title=None,
+                                      scale=alt.Scale(domain=SENT_DOM, range=SENT_RNG))
+                outer = alt.Chart(ring_df[ring_df["リング"] == "貴社商品"]).mark_arc(
+                    innerRadius=66, outerRadius=104).encode(
+                    theta=alt.Theta("値:Q", stack=True), color=color_enc,
+                    tooltip=[alt.Tooltip("リング:N"), alt.Tooltip("感情:N"),
+                             alt.Tooltip("値:Q", format=".1f", title="割合(%)")])
+                inner = alt.Chart(ring_df[ring_df["リング"] == "同カテ商品"]).mark_arc(
+                    innerRadius=28, outerRadius=62).encode(
+                    theta=alt.Theta("値:Q", stack=True),
+                    color=alt.Color("感情:N", legend=None,
+                                    scale=alt.Scale(domain=SENT_DOM, range=SENT_RNG)),
+                    tooltip=[alt.Tooltip("リング:N"), alt.Tooltip("感情:N"),
+                             alt.Tooltip("値:Q", format=".1f", title="割合(%)")])
+                donut = qs_style(alt.layer(outer, inner).properties(height=280))
+                st.altair_chart(donut, use_container_width=True)
+
+            with oc[1]:
+                sub_head("口コミスコア分布図（60以上:ポジティブ／40〜60:普通／40未満:ネガティブ）")
+                sd = rev["score_dist"].melt("score", var_name="系列", value_name="比率")
+                sline = alt.Chart(sd).mark_line(point=True, strokeWidth=2).encode(
+                    x=alt.X("score:Q", title="口コミ感情スコア",
+                            scale=alt.Scale(domain=[0, 100]),
+                            axis=alt.Axis(values=list(range(0, 101, 10)))),
+                    y=alt.Y("比率:Q", title="比率（%）", axis=alt.Axis(format=",.0f")),
+                    color=alt.Color("系列:N", title=None,
+                                    scale=alt.Scale(domain=["貴社商品", "同カテ商品"],
+                                                    range=["#c0392b", "#8a94a6"])),
+                    tooltip=[alt.Tooltip("score:Q", title="スコア"),
+                             alt.Tooltip("系列:N"),
+                             alt.Tooltip("比率:Q", format=".1f", title="比率(%)")],
+                ).properties(height=300)
+                st.altair_chart(qs_style(sline), use_container_width=True)
+
+            picks = st.columns(2)
+            with picks[0]:
+                sub_head("ポジティブコメント PICK UP")
+                if rev["pos_pick"]:
+                    for c in rev["pos_pick"]:
+                        st.markdown(f"<div class='pick-box pick-pos'>{c}</div>",
+                                    unsafe_allow_html=True)
+                else:
+                    st.info("ポジティブコメントがありません。")
+            with picks[1]:
+                sub_head("ネガティブコメント PICK UP")
+                if rev["neg_pick"]:
+                    for c in rev["neg_pick"]:
+                        st.markdown(f"<div class='pick-box pick-neg'>{c}</div>",
+                                    unsafe_allow_html=True)
+                else:
+                    st.info("ネガティブコメントがありません。")
+
+        # ===================== 口コミ一覧（全体）=====================
+        with st.container(border=True):
+            render_title("口コミ一覧（全体）")
+            rv_show = rev["reviews"][["年齢", "性別", "コメント", "感情", "コメント日"]]
+            st.dataframe(rv_show, use_container_width=True, hide_index=True, height=420)
