@@ -22,6 +22,17 @@ st.markdown(
         font-family: 'Noto Sans JP', sans-serif !important;
     }
 
+    /* Material Symbols（展開アイコン等）はアイコン用フォントに戻す。
+       上の [class*="st-"] 一括指定によりアイコンが "arrow_drop_down" という
+       文字列で描画され、ラベルと重なるのを防ぐ。 */
+    [data-testid="stIconMaterial"],
+    span[data-testid="stExpanderToggleIcon"],
+    [data-testid="stExpander"] summary span[data-testid="stIconMaterial"],
+    .material-icons, .material-symbols-rounded, .material-symbols-outlined {
+        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined',
+                     'Material Icons' !important;
+    }
+
     header[data-testid="stHeader"] { height:0; visibility:hidden; }
 
     /* 全体の背景は白 */
